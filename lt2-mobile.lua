@@ -20,9 +20,9 @@ local flyVelocity, flyGyro
 local savedHumanoids = {}
 local treeBusy = false
 local treeJob = 0
-local createdTools = {}
 local selectedStructure
 local selectingStructure = false
+local selectionMode = "structure"
 local selectionHighlight
 local gui
 local function connect(signal, callback)
@@ -57,7 +57,6 @@ local function cleanup()
             humanoid.UseJumpPower = values.usePower
         end
     end
-    for _, tool in ipairs(createdTools) do if tool.Parent then tool:Destroy() end end
     if selectionHighlight then selectionHighlight:Destroy() end
     if gui then gui:Destroy() end
     if env.LT2MobileCleanup == cleanup then env.LT2MobileCleanup = nil end
@@ -215,62 +214,105 @@ connect(RunService.Heartbeat, function()
 end)
 connect(player.CharacterAdded, function() stopFly(); flyButton.Text = "FLY: OFF" end)
 section("BUILDING")
-local bRow = row(36)
-button(bRow, "GET BTOOLS", nil, nil, function()
-    local backpack = player:FindFirstChildOfClass("Backpack")
-    if not backpack then tell("Backpack unavailable."); return end
-    for _, tool in ipairs(createdTools) do
-        if tool.Parent then tell("BTools have already been added."); return end
-    end
-    createdTools = {}
-    local ok = pcall(function()
-        for _, binType in ipairs({Enum.BinType.Clone, Enum.BinType.Grab, Enum.BinType.Hammer}) do
-            local tool = Instance.new("HopperBin")
-            tool.BinType = binType
-            tool.Parent = backpack
-            table.insert(createdTools, tool)
-        end
-    end)
-    if not ok then
-        for _, tool in ipairs(createdTools) do if tool.Parent then tool:Destroy() end end
-        createdTools = {}
-    end
-    tell(ok and "BTools added. Server changes may not replicate." or "BTools are unavailable in this client.")
-end)
-local selectRow = row(36)
-button(selectRow, "SELECT PLACED STRUCTURE", nil, nil, function()
+-- Touch-friendly building controls operate on models owned by the player.
+local function beginSelection(mode)
     selectedStructure = nil
     if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
     selectingStructure = true
-    tell("Tap a placed structure that you own.")
-end)
+    selectionMode = mode
+    tell(mode == "structure" and "Tap a placed structure that you own." or "Tap an object or log that you own.")
+end
+local bRow = row(36)
+button(bRow, "BTOOLS: SELECT OBJECT", nil, nil, function() beginSelection("object") end)
+local selectRow = row(36)
+button(selectRow, "SELECT PLACED STRUCTURE", nil, nil, function() beginSelection("structure") end)
 connect(UserInputService.InputBegan, function(input, processed)
     if not selectingStructure or processed then return end
     if input.UserInputType ~= Enum.UserInputType.Touch and input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
     selectingStructure = false
     local cameraNow = workspace.CurrentCamera
     local models = workspace:FindFirstChild("PlayerModels")
-    if not cameraNow or not models then tell("Placed structures are unavailable."); return end
+    local logs = workspace:FindFirstChild("LogModels")
+    if not cameraNow or not models then tell("Placed objects are unavailable."); return end
     local ray = cameraNow:ScreenPointToRay(input.Position.X, input.Position.Y)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = player.Character and {player.Character} or {}
     local hit = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
     local model = hit and hit.Instance
-    while model and model.Parent ~= models do model = model.Parent end
+    while model and model ~= workspace and model.Parent ~= models and (not logs or model.Parent ~= logs) do model = model.Parent end
     local owner = model and model:FindFirstChild("Owner")
     local kind = model and model:FindFirstChild("Type")
-    if not model or not model:IsA("Model") or not owner or owner.Value ~= player or not kind or kind.Value ~= "Structure" or not model.PrimaryPart then
-        selectedStructure = nil
-        if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
-        tell("Tap one of your own placed structures.")
+    local inOwnedFolder = model and (model.Parent == models or (logs and model.Parent == logs))
+    local structure = model and model.Parent == models and kind and kind.Value == "Structure" and model.PrimaryPart
+    if not inOwnedFolder or not model:IsA("Model") or not owner or owner.Value ~= player or (selectionMode == "structure" and not structure) then
+        tell(selectionMode == "structure" and "Tap one of your own placed structures." or "Tap one of your own objects or logs.")
         return
     end
     selectedStructure = model
-    if selectionHighlight then selectionHighlight:Destroy() end
     selectionHighlight = make("Highlight", {Adornee = model, FillTransparency = .7, OutlineColor = colors.accent, DepthMode = Enum.HighlightDepthMode.AlwaysOnTop}, model)
-    local item = model:FindFirstChild("ItemName")
-    tell("Selected " .. (item and tostring(item.Value) or "structure") .. ".")
+    local item = model:FindFirstChild("ItemName") or model:FindFirstChild("TreeClass")
+    tell("Selected " .. (item and tostring(item.Value) or "object") .. ".")
+end)
+local function selectedOwnedObject()
+    local model = selectedStructure
+    local owner = model and model:FindFirstChild("Owner")
+    if not model or not model.Parent or not owner or owner.Value ~= player then return nil end
+    return model
+end
+local toolRow = row(36)
+button(toolRow, "MOVE TO ME", UDim2.new(0, 0, 0, 0), UDim2.new(.5, -4, 1, 0), function()
+    local model = selectedOwnedObject()
+    local _, _, root = characterParts()
+    if not model or not root then tell("Select your object first."); return end
+    local kind = model:FindFirstChild("Type")
+    if kind and kind.Value == "Structure" then
+        local placement = ReplicatedStorage:FindFirstChild("PlaceStructure")
+        local remote = placement and placement:FindFirstChild("ClientPlacedStructure")
+        if not model.PrimaryPart or not remote or not remote:IsA("RemoteEvent") then tell("Structure move is unavailable."); return end
+        local target = (root.CFrame * CFrame.new(0, 0, -6)).Position
+        local current = model.PrimaryPart.CFrame
+        remote:FireServer(nil, current - current.Position + target, player, nil, model, true)
+        tell("Structure move requested. Check whether the server accepted it.")
+        return
+    end
+    local interaction = ReplicatedStorage:FindFirstChild("Interaction")
+    local ownership = interaction and interaction:FindFirstChild("ClientRequestOwnership")
+    local drag = interaction and interaction:FindFirstChild("ClientIsDragging")
+    if not ownership or not drag then tell("Object move is unavailable."); return end
+    local destination = (root.CFrame * CFrame.new(0, 3, -6)).Position
+    tell("Moving selected object...")
+    task.spawn(function()
+        local ok, err = pcall(function()
+            for _ = 1, 20 do
+                if not running or not model.Parent or not selectedOwnedObject() or selectedStructure ~= model then break end
+                ownership:FireServer(model)
+                drag:FireServer(model)
+                model:MoveTo(destination)
+                task.wait(.1)
+            end
+        end)
+        tell(ok and "Object move requested. Check whether the server accepted it." or ("Object move failed: " .. tostring(err)))
+    end)
+end)
+button(toolRow, "DELETE", UDim2.new(.5, 4, 0, 0), UDim2.new(.5, -4, 1, 0), function()
+    local model = selectedOwnedObject()
+    if not model then tell("Select your object first."); return end
+    local interaction = ReplicatedStorage:FindFirstChild("Interaction")
+    local remote = interaction and interaction:FindFirstChild("DestroyStructure")
+    if not remote or not remote:IsA("RemoteEvent") then tell("Object deletion is unavailable."); return end
+    local ok, err = pcall(function()
+        local ownership = interaction:FindFirstChild("ClientRequestOwnership")
+        local drag = interaction:FindFirstChild("ClientIsDragging")
+        local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+        if ownership and part then ownership:FireServer(part) end
+        if drag then drag:FireServer(model) end
+        remote:FireServer(model)
+    end)
+    if not ok then tell("Delete failed: " .. tostring(err)); return end
+    selectedStructure = nil
+    if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
+    tell("Delete requested. Check whether the server accepted it.")
 end)
 local rotateRow = row(36)
 button(rotateRow, "ROTATE SELECTED 90°", nil, nil, function()
@@ -312,6 +354,7 @@ local function findAxe(character)
 end
 local function bringTree()
     if treeBusy then tell("A tree request is already running."); return end
+    tell("Checking axe and available trees...")
     local character, humanoid, root = characterParts()
     if not character or not humanoid or not root then tell("Wait for your character to load."); return end
     local axe, axeName = findAxe(character)
@@ -321,7 +364,8 @@ local function bringTree()
     local drag = interaction and interaction:FindFirstChild("ClientIsDragging")
     local ownership = interaction and interaction:FindFirstChild("ClientRequestOwnership")
     local logs = workspace:FindFirstChild("LogModels")
-    if not proxy or not drag or not ownership or not logs then tell("Tree remotes are unavailable in this server."); return end
+    if not proxy or not logs then tell("Tree cutting is unavailable in this server."); return end
+    if not drag then tell("Tree transfer is unavailable: drag remote missing."); return end
     local treeClass = treeTypes[treeIndex][2]
     local tree, sectionPart
     for _, region in ipairs(workspace:GetChildren()) do
@@ -337,7 +381,7 @@ local function bringTree()
         end
         if tree then break end
     end
-    if not tree then tell("No available " .. treeTypes[treeIndex][1] .. " tree found."); return end
+    if not tree then tell("No " .. treeTypes[treeIndex][1] .. " tree loaded. Move closer and try again."); return end
     treeBusy = true
     treeJob = treeJob + 1
     local job = treeJob
@@ -363,6 +407,7 @@ local function bringTree()
     tell("Cutting " .. treeTypes[treeIndex][1] .. "; returning when finished.")
     local success, err = pcall(function()
         root.CFrame = sectionPart.CFrame + Vector3.new(4, 2, 2)
+        task.wait(.3)
         local damage = axeDamage[axeName]
         if treeClass == "Volcano" and axeName == "FireAxe" then damage = 6.35 end
         if treeClass == "LoneCave" and axeName == "EndTimesAxe" then damage = 10000000 end
@@ -381,15 +426,17 @@ local function bringTree()
             -- near the tree until the server has had time to process the request.
             for _ = 1, 10 do
                 if not foundLog.Parent or not running or treeJob ~= job or character ~= player.Character then break end
-                ownership:FireServer(foundLog)
-                ownership:FireServer(wood)
+                if ownership then
+                    ownership:FireServer(foundLog)
+                    ownership:FireServer(wood)
+                end
                 drag:FireServer(foundLog)
                 task.wait(.1)
             end
             local destination = (original * CFrame.new(0, 3, -6)).Position
             for _ = 1, 20 do
                 if not foundLog.Parent or not running or treeJob ~= job or character ~= player.Character then break end
-                ownership:FireServer(foundLog)
+                if ownership then ownership:FireServer(foundLog) end
                 drag:FireServer(foundLog)
                 foundLog:MoveTo(destination)
                 movedLog = true
@@ -407,4 +454,13 @@ local function bringTree()
     else tell("No log appeared within 20 seconds. The server may have rejected the cut.") end
 end
 local bringRow = row(36)
-button(bringRow, "BRING ONE TREE", nil, nil, function() task.spawn(bringTree) end)
+button(bringRow, "BRING ONE TREE", nil, nil, function()
+    tell("Starting tree request...")
+    task.spawn(function()
+        local ok, err = pcall(bringTree)
+        if not ok then
+            treeBusy = false
+            tell("Tree request failed: " .. tostring(err))
+        end
+    end)
+end)
