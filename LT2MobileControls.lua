@@ -1,5 +1,5 @@
 -- Lumber Tycoon 2 mobile controls. Run as a client script in Delta.
--- Tree and structure interactions use LT2 remotes and depend on server behavior.
+-- Log and structure interactions use LT2 remotes and depend on server behavior.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -20,11 +20,13 @@ local flyVelocity, flyGyro
 local savedHumanoids = {}
 local treeBusy = false
 local treeJob = 0
+local treeReturn
 local selectedStructure
 local selectingStructure = false
 local selectionMode = "structure"
 local selectionHighlight
 local viewportConnection
+local logConnection
 local gui
 local function connect(signal, callback)
     local connection = signal:Connect(callback)
@@ -49,9 +51,11 @@ local function cleanup()
     if not running then return end
     running = false
     treeJob = treeJob + 1
+    if treeReturn then treeReturn() end
     stopFly()
     for _, connection in ipairs(connections) do connection:Disconnect() end
     if viewportConnection then viewportConnection:Disconnect(); viewportConnection = nil end
+    if logConnection then logConnection:Disconnect(); logConnection = nil end
     for humanoid, values in pairs(savedHumanoids) do
         if humanoid.Parent then
             humanoid.WalkSpeed = values.walk
@@ -341,132 +345,124 @@ button(rotateRow, "ROTATE SELECTED 90°", nil, nil, function()
     tell("Rotation requested. Select the structure again to rotate it further.")
 end)
 section("BRING TREE")
-local treeTypes = {{"Oak", "Generic"}, {"Cherry", "Cherry"}, {"Gold", "GoldSwampy"}, {"Cavecrawler", "CaveCrawler"}, {"Frost", "Frost"}, {"Lava", "Volcano"}, {"Elm", "Oak"}, {"Walnut", "Walnut"}, {"Birch", "Birch"}, {"Snowglow", "SnowGlow"}, {"Pine", "GreenSwampy"}, {"Koa", "Koa"}, {"Palm", "Palm"}, {"Spook", "Spooky"}, {"Sinister", "SpookyNeon"}, {"End Times", "LoneCave"}}
-local treeIndex = 1
+-- Only logs that appear after the tools start can be identified as recent.
+local recentLog, logFolder
+local logSequence, recentSequence = 0, 0
 local treeRow = row(36)
-local treeLabel = button(treeRow, "TREE: Oak", UDim2.new(0, 0, 0, 0), UDim2.new(.7, -4, 1, 0), function() end)
-button(treeRow, "NEXT ›", UDim2.new(.7, 4, 0, 0), UDim2.new(.3, -4, 1, 0), function()
-    treeIndex = treeIndex % #treeTypes + 1
-    treeLabel.Text = "TREE: " .. treeTypes[treeIndex][1]
-end)
-local axeDamage = {Beesaxe=1.4, AxeAmber=3.39, ManyAxe=10.2, BasicHatchet=.2, Axe1=.55, Axe2=.93, AxeAlphaTesters=1.5, Rukiryaxe=1.68, Axe3=1.45, AxeBetaTesters=1.45, FireAxe=.6, SilverAxe=1.6, EndTimesAxe=1.58, AxeChicken=.9, AxeTwitter=1.65, CandyCornAxe=1.75}
-local function findAxe(character)
-    for _, container in ipairs({character, player:FindFirstChildOfClass("Backpack")}) do
-        if container then
-            for _, tool in ipairs(container:GetChildren()) do
-                local name = tool:FindFirstChild("ToolName")
-                if tool:IsA("Tool") and name and axeDamage[name.Value] then return tool, name.Value end
-            end
-        end
-    end
-end
-local function bringTree()
-    if treeBusy then tell("A tree request is already running."); return end
-    tell("Checking axe and available trees...")
-    local character, humanoid, root = characterParts()
-    if not character or not humanoid or not root then tell("Wait for your character to load."); return end
-    local axe, axeName = findAxe(character)
-    if not axe then tell("Equip or carry a supported axe first."); return end
-    local interaction = ReplicatedStorage:FindFirstChild("Interaction")
-    local proxy = interaction and interaction:FindFirstChild("RemoteProxy")
-    local drag = interaction and interaction:FindFirstChild("ClientIsDragging")
-    local ownership = interaction and interaction:FindFirstChild("ClientRequestOwnership")
-    local logs = workspace:FindFirstChild("LogModels")
-    if not proxy or not logs then tell("Tree cutting is unavailable in this server."); return end
-    if not drag then tell("Tree transfer is unavailable: drag remote missing."); return end
-    local treeClass = treeTypes[treeIndex][2]
-    local tree, sectionPart
-    for _, region in ipairs(workspace:GetChildren()) do
-        if region.Name == "TreeRegion" then
-            for _, candidate in ipairs(region:GetChildren()) do
-                local class = candidate:FindFirstChild("TreeClass")
-                local owner = candidate:FindFirstChild("Owner")
-                local wood = candidate:FindFirstChild("WoodSection")
-                if candidate:IsA("Model") and class and class.Value == treeClass and candidate:FindFirstChild("CutEvent") and wood and wood:IsA("BasePart") and (not owner or owner.Value == nil or owner.Value == player) then
-                    tree, sectionPart = candidate, wood; break
-                end
-            end
-        end
-        if tree then break end
-    end
-    if not tree then tell("No " .. treeTypes[treeIndex][1] .. " tree loaded. Move closer and try again."); return end
-    treeBusy = true
-    treeJob = treeJob + 1
-    local job = treeJob
-    stopFly(); flyButton.Text = "FLY: OFF"
-    local original = root.CFrame
-    local foundLog
-    local movedLog = false
-    local connection = logs.ChildAdded:Connect(function(log)
+local treeLabel = button(treeRow, "CHOP A TREE NEARBY FIRST", nil, nil, nil)
+
+local function watchLogs(folder)
+    if logConnection then logConnection:Disconnect(); logConnection = nil end
+    logFolder = folder
+    recentLog = nil
+    treeLabel.Text = "CHOP A TREE NEARBY FIRST"
+    if not folder then return end
+    logConnection = folder.ChildAdded:Connect(function(log)
+        local _, _, root = characterParts()
+        if not root or not log:IsA("Model") then return end
+        local chopPosition = root.Position
+        logSequence = logSequence + 1
+        local sequence = logSequence
         task.spawn(function()
             local deadline = os.clock() + 6
-            while running and treeJob == job and log.Parent == logs and not foundLog and os.clock() < deadline do
+            while running and logFolder == folder and log.Parent == folder and os.clock() < deadline do
                 local owner = log:FindFirstChild("Owner")
                 local class = log:FindFirstChild("TreeClass")
                 local wood = log:FindFirstChild("WoodSection")
-                if owner and class and wood and owner.Value == player and class.Value == treeClass then
-                    foundLog = log
+                if owner and owner:IsA("ObjectValue") and owner.Value ~= nil and class and class:IsA("StringValue") and wood and wood:IsA("BasePart") then
+                    if owner.Value == player and (wood.Position - chopPosition).Magnitude <= 120 and sequence > recentSequence then
+                        recentSequence = sequence
+                        recentLog = log
+                        treeLabel.Text = "RECENT TREE: " .. tostring(class.Value)
+                    end
                     return
                 end
                 task.wait(.1)
             end
         end)
     end)
-    tell("Cutting " .. treeTypes[treeIndex][1] .. "; returning when finished.")
+end
+connect(workspace.ChildAdded, function(child)
+    if child.Name == "LogModels" then watchLogs(child) end
+end)
+connect(workspace.ChildRemoved, function(child)
+    if child == logFolder then watchLogs(nil) end
+end)
+watchLogs(workspace:FindFirstChild("LogModels"))
+
+local function bringTree()
+    if treeBusy then tell("A tree request is already running."); return end
+    local log = recentLog
+    local owner = log and log:FindFirstChild("Owner")
+    local wood = log and log:FindFirstChild("WoodSection")
+    if not log or log.Parent ~= logFolder or not owner or not owner:IsA("ObjectValue") or owner.Value ~= player or not wood or not wood:IsA("BasePart") then
+        tell("Chop a tree nearby while these tools are open, then try again.")
+        return
+    end
+    local character, humanoid, root = characterParts()
+    if not character or not humanoid or not root then tell("Wait for your character to load."); return end
+    local interaction = ReplicatedStorage:FindFirstChild("Interaction")
+    local drag = interaction and interaction:FindFirstChild("ClientIsDragging")
+    local ownership = interaction and interaction:FindFirstChild("ClientRequestOwnership")
+    if not drag or not drag:IsA("RemoteEvent") then tell("Tree transfer is unavailable: drag remote missing."); return end
+    if ownership and not ownership:IsA("RemoteEvent") then ownership = nil end
+
+    treeBusy = true
+    treeJob = treeJob + 1
+    local job = treeJob
+    stopFly(); flyButton.Text = "FLY: OFF"
+    local original = root.CFrame
+    local destination = original.Position + Vector3.new(0, 3, 0)
+    local movedLog = false
+    local function restorePosition()
+        if treeReturn ~= restorePosition then return end
+        treeReturn = nil
+        if root.Parent and player.Character == character then root.CFrame = original end
+    end
+    treeReturn = restorePosition
+    local function canContinue()
+        return running and treeJob == job and player.Character == character and root.Parent
+            and log.Parent == logFolder and owner.Parent == log and owner.Value == player and wood.Parent == log
+    end
+    tell("Moving your recent log back...")
     local success, err = pcall(function()
-        root.CFrame = sectionPart.CFrame + Vector3.new(4, 2, 2)
-        task.wait(.3)
-        local damage = axeDamage[axeName]
-        if treeClass == "Volcano" and axeName == "FireAxe" then damage = 6.35 end
-        if treeClass == "LoneCave" and axeName == "EndTimesAxe" then damage = 10000000 end
-        local deadline = os.clock() + 20
-        while running and treeJob == job and character == player.Character and not foundLog and os.clock() < deadline do
-            local cutEvent = tree.Parent and tree:FindFirstChild("CutEvent")
-            if cutEvent then
-                proxy:FireServer(cutEvent, {tool = axe, faceVector = Vector3.new(0, 0, -1), height = .3, sectionId = 1, hitPoints = damage, cooldown = .1, cuttingClass = "Axe"})
+        root.CFrame = wood.CFrame + Vector3.new(4, 2, 2)
+        for _ = 1, 10 do
+            if not canContinue() then return end
+            if ownership then
+                ownership:FireServer(log)
+                ownership:FireServer(wood)
             end
-            task.wait(.12)
+            drag:FireServer(log)
+            task.wait(.1)
         end
-        if foundLog and foundLog.Parent and running and treeJob == job and character == player.Character then
-            local wood = foundLog:FindFirstChild("WoodSection")
-            if not wood or not wood:IsA("BasePart") then error("Cut log has no wood section") end
-            -- Request physics ownership before moving the new log; keep the player
-            -- near the tree until the server has had time to process the request.
-            for _ = 1, 10 do
-                if not foundLog.Parent or not running or treeJob ~= job or character ~= player.Character then break end
-                if ownership then
-                    ownership:FireServer(foundLog)
-                    ownership:FireServer(wood)
-                end
-                drag:FireServer(foundLog)
-                task.wait(.1)
+        for _ = 1, 20 do
+            if not canContinue() then return end
+            if ownership then
+                ownership:FireServer(log)
+                ownership:FireServer(wood)
             end
-            local destination = (original * CFrame.new(0, 3, -6)).Position
-            for _ = 1, 20 do
-                if not foundLog.Parent or not running or treeJob ~= job or character ~= player.Character then break end
-                if ownership then ownership:FireServer(foundLog) end
-                drag:FireServer(foundLog)
-                foundLog:MoveTo(destination)
-                movedLog = true
-                task.wait(.1)
-            end
+            drag:FireServer(log)
+            -- Place the wood section at the destination without depending on the model's pivot.
+            log:PivotTo(log:GetPivot() + (destination - wood.Position))
+            movedLog = true
+            root.CFrame = original
+            task.wait(.1)
         end
     end)
-    connection:Disconnect()
-    if root.Parent and player.Character == character then root.CFrame = original end
+    restorePosition()
     treeBusy = false
     if not running then return end
-    if not success then tell("Tree request failed: " .. tostring(err))
+    if not success then tell("Tree move failed: " .. tostring(err))
     elseif movedLog then tell("Tree move requested. Check whether the server accepted it.")
-    elseif foundLog then tell("The log disappeared before it could be moved.")
-    else tell("No log appeared within 20 seconds. The server may have rejected the cut.") end
+    else tell("The log or character became unavailable before the move.") end
 end
 local bringRow = row(36)
-button(bringRow, "BRING ONE TREE", nil, nil, function()
-    tell("Starting tree request...")
+button(bringRow, "BRING RECENT TREE", nil, nil, function()
     task.spawn(function()
         local ok, err = pcall(bringTree)
         if not ok then
+            if treeReturn then treeReturn() end
             treeBusy = false
             tell("Tree request failed: " .. tostring(err))
         end
