@@ -13,7 +13,6 @@ end
 local connections = {}
 local running = true
 local flying = false
-local flyVertical = 0
 local flySpeed = 50
 local walkSpeed = 16
 local jumpHeight = 7.2
@@ -22,6 +21,9 @@ local savedHumanoids = {}
 local treeBusy = false
 local treeJob = 0
 local createdTools = {}
+local selectedStructure
+local selectingStructure = false
+local selectionHighlight
 local gui
 local function connect(signal, callback)
     local connection = signal:Connect(callback)
@@ -34,7 +36,6 @@ local function characterParts()
 end
 local function stopFly()
     flying = false
-    flyVertical = 0
     if flyVelocity then flyVelocity:Destroy(); flyVelocity = nil end
     if flyGyro then flyGyro:Destroy(); flyGyro = nil end
 end
@@ -57,6 +58,7 @@ local function cleanup()
         end
     end
     for _, tool in ipairs(createdTools) do if tool.Parent then tool:Destroy() end end
+    if selectionHighlight then selectionHighlight:Destroy() end
     if gui then gui:Destroy() end
     if env.LT2MobileCleanup == cleanup then env.LT2MobileCleanup = nil end
 end
@@ -160,7 +162,7 @@ slider("Fly speed", 10, 150, 50, function(value) flySpeed = value end)
 slider("Jump height", 7.2, 60, 7.2, function(value) jumpHeight = value end)
 local flyRow = row(36)
 local flyButton
-flyButton = button(flyRow, "FLY: OFF", UDim2.new(0, 0, 0, 0), UDim2.new(.46, -3, 1, 0), function()
+flyButton = button(flyRow, "FLY: OFF", nil, nil, function()
     if flying then
         stopFly()
         flyButton.Text = "FLY: OFF"
@@ -173,19 +175,22 @@ flyButton = button(flyRow, "FLY: OFF", UDim2.new(0, 0, 0, 0), UDim2.new(.46, -3,
     flyGyro = make("BodyGyro", {Name = "LT2FlyGyro", MaxTorque = Vector3.new(0, 1e6, 0), P = 10000, CFrame = root.CFrame}, root)
     flying = true
     flyButton.Text = "FLY: ON"
-    tell("Use the joystick to fly; hold UP or DOWN for height.")
+    tell("Use the joystick and aim the camera to fly.")
 end)
-local up = button(flyRow, "UP", UDim2.new(.46, 3, 0, 0), UDim2.new(.27, -6, 1, 0))
-local down = button(flyRow, "DOWN", UDim2.new(.73, 0, 0, 0), UDim2.new(.27, 0, 1, 0))
-local function holdButton(b, direction)
-    local active
-    connect(b.InputBegan, function(input)
-        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then active = input; flyVertical = direction end
-    end)
-    connect(UserInputService.InputEnded, function(input) if input == active then active = nil; if flyVertical == direction then flyVertical = 0 end end end)
+-- MoveDirection is horizontal and camera-relative. Restore the camera's pitch
+-- to the forward component while keeping sideways movement level.
+local function flightDirection(moveDirection, cameraCFrame)
+    local look = cameraCFrame.LookVector
+    local right = Vector3.new(cameraCFrame.RightVector.X, 0, cameraCFrame.RightVector.Z)
+    if right.Magnitude < 0.001 then return moveDirection end
+    right = right.Unit
+    local flatForward = Vector3.new(0, 1, 0):Cross(right)
+    local forwardAmount = moveDirection:Dot(flatForward)
+    local sidewaysAmount = moveDirection:Dot(right)
+    local direction = look * forwardAmount + right * sidewaysAmount
+    if direction.Magnitude > 1 then return direction.Unit end
+    return direction
 end
-holdButton(up, 1)
-holdButton(down, -1)
 connect(RunService.Heartbeat, function()
     local _, humanoid, root = characterParts()
     if humanoid then
@@ -198,10 +203,9 @@ connect(RunService.Heartbeat, function()
         if not root or not humanoid or not flyVelocity or flyVelocity.Parent ~= root then
             stopFly(); flyButton.Text = "FLY: OFF"; return
         end
-        local direction = humanoid.MoveDirection + Vector3.new(0, flyVertical, 0)
-        if direction.Magnitude > 1 then direction = direction.Unit end
-        flyVelocity.Velocity = direction * flySpeed
         local cameraNow = workspace.CurrentCamera
+        local direction = cameraNow and flightDirection(humanoid.MoveDirection, cameraNow.CFrame) or humanoid.MoveDirection
+        flyVelocity.Velocity = direction * flySpeed
         if cameraNow then
             local look = cameraNow.CFrame.LookVector
             local flat = Vector3.new(look.X, 0, look.Z)
@@ -233,33 +237,58 @@ button(bRow, "GET BTOOLS", nil, nil, function()
     end
     tell(ok and "BTools added. Server changes may not replicate." or "BTools are unavailable in this client.")
 end)
-local rotateRow = row(36)
-button(rotateRow, "ROTATE HELD STRUCTURE", nil, nil, function()
-    local playerGui = player:FindFirstChildOfClass("PlayerGui")
-    local dragGui = playerGui and playerGui:FindFirstChild("StructureDraggingGUI")
-    local rotate = dragGui and dragGui:FindFirstChild("Rotate", true)
-    local rotateButton = rotate and (rotate:IsA("GuiButton") and rotate or rotate:FindFirstChildWhichIsA("GuiButton", true))
-    if not dragGui or not rotateButton or not rotateButton.Visible or (dragGui:IsA("ScreenGui") and not dragGui.Enabled) then
-        tell("Start moving a structure in the game first.")
+local selectRow = row(36)
+button(selectRow, "SELECT PLACED STRUCTURE", nil, nil, function()
+    selectedStructure = nil
+    if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
+    selectingStructure = true
+    tell("Tap a placed structure that you own.")
+end)
+connect(UserInputService.InputBegan, function(input, processed)
+    if not selectingStructure or processed then return end
+    if input.UserInputType ~= Enum.UserInputType.Touch and input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+    selectingStructure = false
+    local cameraNow = workspace.CurrentCamera
+    local models = workspace:FindFirstChild("PlayerModels")
+    if not cameraNow or not models then tell("Placed structures are unavailable."); return end
+    local ray = cameraNow:ScreenPointToRay(input.Position.X, input.Position.Y)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = player.Character and {player.Character} or {}
+    local hit = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
+    local model = hit and hit.Instance
+    while model and model.Parent ~= models do model = model.Parent end
+    local owner = model and model:FindFirstChild("Owner")
+    local kind = model and model:FindFirstChild("Type")
+    if not model or not model:IsA("Model") or not owner or owner.Value ~= player or not kind or kind.Value ~= "Structure" or not model.PrimaryPart then
+        selectedStructure = nil
+        if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
+        tell("Tap one of your own placed structures.")
         return
     end
-    if type(firesignal) == "function" then
-        local ok = pcall(firesignal, rotateButton.MouseButton1Click)
-        tell(ok and "Rotation control triggered." or "Could not trigger the rotation control.")
-    elseif type(getconnections) == "function" then
-        local ok, listeners = pcall(getconnections, rotateButton.MouseButton1Click)
-        if not ok or #listeners == 0 then tell("Rotation control has no accessible listeners."); return end
-        local fired = false
-        for _, listener in ipairs(listeners) do
-            if type(listener.Fire) == "function" then
-                local firedOk = pcall(function() listener:Fire() end)
-                fired = fired or firedOk
-            end
-        end
-        tell(fired and "Rotation control triggered." or "Could not trigger the rotation control.")
-    else
-        tell("Delta does not expose a supported rotation signal here.")
+    selectedStructure = model
+    if selectionHighlight then selectionHighlight:Destroy() end
+    selectionHighlight = make("Highlight", {Adornee = model, FillTransparency = .7, OutlineColor = colors.accent, DepthMode = Enum.HighlightDepthMode.AlwaysOnTop}, model)
+    local item = model:FindFirstChild("ItemName")
+    tell("Selected " .. (item and tostring(item.Value) or "structure") .. ".")
+end)
+local rotateRow = row(36)
+button(rotateRow, "ROTATE SELECTED 90°", nil, nil, function()
+    local model = selectedStructure
+    local owner = model and model:FindFirstChild("Owner")
+    local kind = model and model:FindFirstChild("Type")
+    if not model or not model.Parent or not model.PrimaryPart or not owner or owner.Value ~= player or not kind or kind.Value ~= "Structure" then
+        tell("Select one of your placed structures first.")
+        return
     end
+    local placement = ReplicatedStorage:FindFirstChild("PlaceStructure")
+    local remote = placement and placement:FindFirstChild("ClientPlacedStructure")
+    if not remote or not remote:IsA("RemoteEvent") then tell("Structure placement remote unavailable."); return end
+    local rotated = model.PrimaryPart.CFrame * CFrame.Angles(0, math.rad(90), 0)
+    remote:FireServer(nil, rotated, player, nil, model, true)
+    selectedStructure = nil
+    if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
+    tell("Rotation requested. Select the structure again to rotate it further.")
 end)
 section("BRING TREE")
 local treeTypes = {{"Oak", "Generic"}, {"Cherry", "Cherry"}, {"Gold", "GoldSwampy"}, {"Cavecrawler", "CaveCrawler"}, {"Frost", "Frost"}, {"Lava", "Volcano"}, {"Elm", "Oak"}, {"Walnut", "Walnut"}, {"Birch", "Birch"}, {"Snowglow", "SnowGlow"}, {"Pine", "GreenSwampy"}, {"Koa", "Koa"}, {"Palm", "Palm"}, {"Spook", "Spooky"}, {"Sinister", "SpookyNeon"}, {"End Times", "LoneCave"}}
@@ -290,8 +319,9 @@ local function bringTree()
     local interaction = ReplicatedStorage:FindFirstChild("Interaction")
     local proxy = interaction and interaction:FindFirstChild("RemoteProxy")
     local drag = interaction and interaction:FindFirstChild("ClientIsDragging")
+    local ownership = interaction and interaction:FindFirstChild("ClientRequestOwnership")
     local logs = workspace:FindFirstChild("LogModels")
-    if not proxy or not drag or not logs then tell("Tree remotes are unavailable in this server."); return end
+    if not proxy or not drag or not ownership or not logs then tell("Tree remotes are unavailable in this server."); return end
     local treeClass = treeTypes[treeIndex][2]
     local tree, sectionPart
     for _, region in ipairs(workspace:GetChildren()) do
@@ -314,11 +344,20 @@ local function bringTree()
     stopFly(); flyButton.Text = "FLY: OFF"
     local original = root.CFrame
     local foundLog
+    local movedLog = false
     local connection = logs.ChildAdded:Connect(function(log)
         task.spawn(function()
-            local owner = log:WaitForChild("Owner", 3)
-            local class = log:WaitForChild("TreeClass", 3)
-            if running and treeJob == job and owner and class and owner.Value == player and class.Value == treeClass then foundLog = log end
+            local deadline = os.clock() + 6
+            while running and treeJob == job and log.Parent == logs and not foundLog and os.clock() < deadline do
+                local owner = log:FindFirstChild("Owner")
+                local class = log:FindFirstChild("TreeClass")
+                local wood = log:FindFirstChild("WoodSection")
+                if owner and class and wood and owner.Value == player and class.Value == treeClass then
+                    foundLog = log
+                    return
+                end
+                task.wait(.1)
+            end
         end)
     end)
     tell("Cutting " .. treeTypes[treeIndex][1] .. "; returning when finished.")
@@ -328,16 +367,33 @@ local function bringTree()
         if treeClass == "Volcano" and axeName == "FireAxe" then damage = 6.35 end
         if treeClass == "LoneCave" and axeName == "EndTimesAxe" then damage = 10000000 end
         local deadline = os.clock() + 20
-        while running and treeJob == job and character == player.Character and tree.Parent and not foundLog and os.clock() < deadline do
-            proxy:FireServer(tree.CutEvent, {tool = axe, faceVector = Vector3.new(0, 0, -1), height = .3, sectionId = 1, hitPoints = damage, cooldown = .1, cuttingClass = "Axe"})
+        while running and treeJob == job and character == player.Character and not foundLog and os.clock() < deadline do
+            local cutEvent = tree.Parent and tree:FindFirstChild("CutEvent")
+            if cutEvent then
+                proxy:FireServer(cutEvent, {tool = axe, faceVector = Vector3.new(0, 0, -1), height = .3, sectionId = 1, hitPoints = damage, cooldown = .1, cuttingClass = "Axe"})
+            end
             task.wait(.12)
         end
-        if foundLog and foundLog.Parent and running and treeJob == job then
-            for _ = 1, 7 do
-                if not foundLog.Parent then break end
-                foundLog:MoveTo((original * CFrame.new(0, 3, -6)).Position)
+        if foundLog and foundLog.Parent and running and treeJob == job and character == player.Character then
+            local wood = foundLog:FindFirstChild("WoodSection")
+            if not wood or not wood:IsA("BasePart") then error("Cut log has no wood section") end
+            -- Request physics ownership before moving the new log; keep the player
+            -- near the tree until the server has had time to process the request.
+            for _ = 1, 10 do
+                if not foundLog.Parent or not running or treeJob ~= job or character ~= player.Character then break end
+                ownership:FireServer(foundLog)
+                ownership:FireServer(wood)
                 drag:FireServer(foundLog)
-                task.wait(.08)
+                task.wait(.1)
+            end
+            local destination = (original * CFrame.new(0, 3, -6)).Position
+            for _ = 1, 20 do
+                if not foundLog.Parent or not running or treeJob ~= job or character ~= player.Character then break end
+                ownership:FireServer(foundLog)
+                drag:FireServer(foundLog)
+                foundLog:MoveTo(destination)
+                movedLog = true
+                task.wait(.1)
             end
         end
     end)
@@ -346,7 +402,8 @@ local function bringTree()
     treeBusy = false
     if not running then return end
     if not success then tell("Tree request failed: " .. tostring(err))
-    elseif foundLog then tell("Tree move requested. Check whether the server accepted it.")
+    elseif movedLog then tell("Tree move requested. Check whether the server accepted it.")
+    elseif foundLog then tell("The log disappeared before it could be moved.")
     else tell("No log appeared within 20 seconds. The server may have rejected the cut.") end
 end
 local bringRow = row(36)
