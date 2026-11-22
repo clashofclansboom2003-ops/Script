@@ -1,5 +1,5 @@
 -- Lumber Tycoon 2 mobile controls. Run as a client script in Delta.
--- Log and structure interactions use LT2 remotes and depend on server behavior.
+-- Tree and log interactions use LT2 remotes and depend on server behavior.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -21,15 +21,8 @@ local savedHumanoids = {}
 local treeBusy = false
 local treeJob = 0
 local treeReturn
-local selectedStructure
-local selectingStructure = false
-local selectionMode = "structure"
-local selectionHighlight
 local viewportConnection
 local logConnection
-local hotbarTools, hotbarConnections = {}, {}
-local activeBtool
-local btoolsEnabled = false
 local gui
 local function connect(signal, callback)
     local connection = signal:Connect(callback)
@@ -59,8 +52,6 @@ local function cleanup()
     for _, connection in ipairs(connections) do connection:Disconnect() end
     if viewportConnection then viewportConnection:Disconnect(); viewportConnection = nil end
     if logConnection then logConnection:Disconnect(); logConnection = nil end
-    for _, connection in ipairs(hotbarConnections) do connection:Disconnect() end
-    for _, tool in ipairs(hotbarTools) do tool:Destroy() end
     for humanoid, values in pairs(savedHumanoids) do
         if humanoid.Parent then
             humanoid.WalkSpeed = values.walk
@@ -68,7 +59,6 @@ local function cleanup()
             humanoid.UseJumpPower = values.usePower
         end
     end
-    if selectionHighlight then selectionHighlight:Destroy() end
     if gui then gui:Destroy() end
     if env.LT2MobileCleanup == cleanup then env.LT2MobileCleanup = nil end
 end
@@ -83,19 +73,34 @@ end
 local function round(object, radius)
     make("UICorner", {CornerRadius = UDim.new(0, radius or 8)}, object)
 end
-local colors = {background = Color3.fromRGB(24, 31, 29), panel = Color3.fromRGB(37, 47, 42), accent = Color3.fromRGB(108, 186, 116), text = Color3.fromRGB(245, 248, 242), muted = Color3.fromRGB(177, 191, 179)}
+local colors = {
+    background = Color3.fromRGB(10, 15, 23),
+    panel = Color3.fromRGB(20, 30, 44),
+    card = Color3.fromRGB(17, 26, 39),
+    border = Color3.fromRGB(44, 67, 91),
+    accent = Color3.fromRGB(105, 195, 255),
+    primary = Color3.fromRGB(29, 101, 170),
+    text = Color3.fromRGB(239, 247, 255),
+    muted = Color3.fromRGB(151, 174, 195),
+}
+local function outline(object, color)
+    make("UIStroke", {Color = color or colors.border, Thickness = 1, Transparency = .15}, object)
+end
 gui = make("ScreenGui", {Name = "LT2MobileControls", ResetOnSpawn = false, IgnoreGuiInset = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling}, player:WaitForChild("PlayerGui"))
-local open = make("TextButton", {Name = "Open", Size = UDim2.fromOffset(84, 34), Position = UDim2.new(1, -96, 0, 12), BackgroundColor3 = colors.panel, TextColor3 = colors.text, Font = Enum.Font.GothamBold, TextSize = 13, Text = "LT2 TOOLS", Visible = false}, gui)
-round(open)
-local panel = make("Frame", {Name = "Panel", Size = UDim2.fromOffset(310, 430), Position = UDim2.new(1, -320, 0, 10), BackgroundColor3 = colors.background, BorderSizePixel = 0}, gui)
-round(panel, 10)
+local open = make("TextButton", {Name = "Open", Size = UDim2.fromOffset(98, 38), Position = UDim2.new(1, -110, 0, 12), BackgroundColor3 = colors.panel, TextColor3 = colors.text, Font = Enum.Font.GothamBold, TextSize = 12, Text = "LT2  •  TOOLS", Visible = false}, gui)
+round(open, 10); outline(open)
+local panel = make("Frame", {Name = "Panel", Size = UDim2.fromOffset(320, 480), Position = UDim2.new(1, -330, 0, 10), BackgroundColor3 = colors.background, BorderSizePixel = 0}, gui)
+round(panel, 14); outline(panel)
 local scale = make("UIScale", {Scale = 1}, panel)
 local function resize()
     local camera = workspace.CurrentCamera
     if not camera then return end
     local viewport = camera.ViewportSize
-    scale.Scale = math.min(1, math.max(0.55, (viewport.Y - 25) / 430), math.max(0.55, (viewport.X - 20) / 310))
-    panel.Position = UDim2.new(1, -10 - 310 * scale.Scale, 0, 10)
+    if viewport.X <= 20 or viewport.Y <= 20 then return end
+    local availableWidth, availableHeight = viewport.X - 20, viewport.Y - 20
+    scale.Scale = math.min(1, availableWidth / 320, availableHeight / 260)
+    panel.Size = UDim2.fromOffset(320, math.min(480, availableHeight / scale.Scale))
+    panel.Position = UDim2.new(1, -10 - 320 * scale.Scale, 0, 10)
 end
 local function watchCamera()
     if viewportConnection then viewportConnection:Disconnect(); viewportConnection = nil end
@@ -105,18 +110,25 @@ local function watchCamera()
 end
 connect(workspace:GetPropertyChangedSignal("CurrentCamera"), watchCamera)
 watchCamera()
-local header = make("TextLabel", {Size = UDim2.new(1, -88, 0, 42), Position = UDim2.fromOffset(14, 0), BackgroundTransparency = 1, Text = "LUMBER  /  TOOLS", TextColor3 = colors.text, Font = Enum.Font.GothamBold, TextSize = 15, TextXAlignment = Enum.TextXAlignment.Left}, panel)
-local hide = make("TextButton", {Size = UDim2.fromOffset(36, 30), Position = UDim2.new(1, -78, 0, 6), BackgroundColor3 = colors.panel, TextColor3 = colors.text, Font = Enum.Font.GothamBold, TextSize = 17, Text = "−"}, panel)
-round(hide)
-local close = make("TextButton", {Size = UDim2.fromOffset(32, 30), Position = UDim2.new(1, -38, 0, 6), BackgroundColor3 = colors.panel, TextColor3 = colors.text, Font = Enum.Font.GothamBold, TextSize = 16, Text = "×"}, panel)
-round(close)
+local logo = make("TextLabel", {Size = UDim2.fromOffset(34, 34), Position = UDim2.fromOffset(14, 13), BackgroundColor3 = colors.primary, Text = "LT", TextColor3 = colors.text, Font = Enum.Font.GothamBold, TextSize = 13}, panel)
+round(logo, 9)
+make("TextLabel", {Size = UDim2.fromOffset(150, 20), Position = UDim2.fromOffset(57, 10), BackgroundTransparency = 1, Text = "LUMBER TOOLS", TextColor3 = colors.text, Font = Enum.Font.GothamBold, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left}, panel)
+make("TextLabel", {Size = UDim2.fromOffset(150, 16), Position = UDim2.fromOffset(57, 31), BackgroundTransparency = 1, Text = "MOBILE CONTROL PANEL", TextColor3 = colors.muted, Font = Enum.Font.Gotham, TextSize = 9, TextXAlignment = Enum.TextXAlignment.Left}, panel)
+local hide = make("TextButton", {Size = UDim2.fromOffset(34, 34), Position = UDim2.new(1, -84, 0, 13), BackgroundColor3 = colors.panel, TextColor3 = colors.text, Font = Enum.Font.GothamBold, TextSize = 17, Text = "−"}, panel)
+round(hide, 9)
+local close = make("TextButton", {Size = UDim2.fromOffset(34, 34), Position = UDim2.new(1, -44, 0, 13), BackgroundColor3 = colors.panel, TextColor3 = colors.text, Font = Enum.Font.GothamBold, TextSize = 16, Text = "×"}, panel)
+round(close, 9)
 connect(hide.Activated, function() panel.Visible = false; open.Visible = true end)
 connect(open.Activated, function() panel.Visible = true; open.Visible = false end)
 connect(close.Activated, cleanup)
-local content = make("ScrollingFrame", {Position = UDim2.fromOffset(10, 43), Size = UDim2.new(1, -20, 1, -92), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageColor3 = colors.accent, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y}, panel)
-local layout = make("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder}, content)
+local content = make("ScrollingFrame", {Position = UDim2.fromOffset(14, 62), Size = UDim2.new(1, -28, 1, -127), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = colors.accent, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y}, panel)
+make("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder}, content)
 make("UIPadding", {PaddingBottom = UDim.new(0, 8)}, content)
-local status = make("TextLabel", {Position = UDim2.new(0, 12, 1, -43), Size = UDim2.new(1, -24, 0, 34), BackgroundTransparency = 1, Text = "Ready", TextColor3 = colors.muted, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.Gotham, TextSize = 11}, panel)
+local statusBox = make("Frame", {Position = UDim2.new(0, 14, 1, -54), Size = UDim2.new(1, -28, 0, 42), BackgroundColor3 = colors.card, BorderSizePixel = 0}, panel)
+round(statusBox, 9); outline(statusBox)
+local statusDot = make("Frame", {Position = UDim2.fromOffset(11, 17), Size = UDim2.fromOffset(7, 7), BackgroundColor3 = colors.accent, BorderSizePixel = 0}, statusBox)
+round(statusDot, 4)
+local status = make("TextLabel", {Position = UDim2.fromOffset(25, 3), Size = UDim2.new(1, -32, 1, -6), BackgroundTransparency = 1, Text = "Ready", TextColor3 = colors.muted, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.Gotham, TextSize = 11}, statusBox)
 local function tell(message) if running then status.Text = message end end
 local order = 0
 local function row(height)
@@ -124,29 +136,37 @@ local function row(height)
     return make("Frame", {LayoutOrder = order, Size = UDim2.new(1, -6, 0, height), BackgroundTransparency = 1}, content)
 end
 local function button(parent, text, position, size, callback)
-    local b = make("TextButton", {Position = position or UDim2.new(), Size = size or UDim2.new(1, 0, 1, 0), BackgroundColor3 = colors.panel, TextColor3 = colors.text, Font = Enum.Font.GothamSemibold, TextSize = 12, Text = text, AutoButtonColor = true}, parent)
-    round(b, 6)
+    local b = make("TextButton", {Position = position or UDim2.new(), Size = size or UDim2.new(1, 0, 1, 0), BackgroundColor3 = colors.panel, TextColor3 = colors.text, Font = Enum.Font.GothamSemibold, TextSize = 12, Text = text, AutoButtonColor = true, BorderSizePixel = 0}, parent)
+    round(b, 9); outline(b)
     if callback then connect(b.Activated, callback) end
     return b
 end
 local function section(text)
-    local r = row(20)
-    make("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = text, TextColor3 = colors.accent, Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left}, r)
+    local r = row(24)
+    local marker = make("Frame", {Position = UDim2.fromOffset(0, 6), Size = UDim2.fromOffset(3, 12), BackgroundColor3 = colors.accent, BorderSizePixel = 0}, r)
+    round(marker, 2)
+    make("TextLabel", {Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -10, 1, 0), BackgroundTransparency = 1, Text = text, TextColor3 = colors.accent, Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left}, r)
 end
 local function slider(label, min, max, initial, callback)
-    local r = row(52)
-    local title = make("TextLabel", {Size = UDim2.new(1, 0, 0, 21), BackgroundTransparency = 1, TextColor3 = colors.text, Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left}, r)
-    local track = make("Frame", {Position = UDim2.fromOffset(0, 31), Size = UDim2.new(1, 0, 0, 7), BackgroundColor3 = Color3.fromRGB(66, 79, 70), BorderSizePixel = 0, Active = true}, r)
-    round(track, 4)
-    local fill = make("Frame", {Size = UDim2.fromScale(0, 1), BackgroundColor3 = colors.accent, BorderSizePixel = 0}, track)
-    round(fill, 4)
+    local r = row(66)
+    r.BackgroundTransparency = 0
+    r.BackgroundColor3 = colors.card
+    round(r, 10); outline(r)
+    make("TextLabel", {Position = UDim2.fromOffset(12, 6), Size = UDim2.new(1, -85, 0, 22), BackgroundTransparency = 1, Text = label, TextColor3 = colors.text, Font = Enum.Font.GothamSemibold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left}, r)
+    local valueLabel = make("TextLabel", {Position = UDim2.new(1, -68, 0, 5), Size = UDim2.fromOffset(56, 24), BackgroundColor3 = colors.panel, TextColor3 = colors.accent, Font = Enum.Font.GothamBold, TextSize = 11}, r)
+    round(valueLabel, 7)
+    local track = make("Frame", {Position = UDim2.fromOffset(12, 34), Size = UDim2.new(1, -24, 0, 24), BackgroundTransparency = 1, BorderSizePixel = 0, Active = true}, r)
+    local rail = make("Frame", {Position = UDim2.new(0, 0, .5, -3), Size = UDim2.new(1, 0, 0, 6), BackgroundColor3 = colors.border, BorderSizePixel = 0}, track)
+    round(rail, 3)
+    local fill = make("Frame", {Size = UDim2.fromScale(0, 1), BackgroundColor3 = colors.accent, BorderSizePixel = 0}, rail)
+    round(fill, 3)
     local knob = make("Frame", {AnchorPoint = Vector2.new(.5, .5), Size = UDim2.fromOffset(18, 18), Position = UDim2.fromScale(0, .5), BackgroundColor3 = colors.text, BorderSizePixel = 0, Active = true}, track)
-    round(knob, 10)
+    round(knob, 9); outline(knob, colors.accent)
     local activeInput
     local function set(value)
         value = math.floor(math.clamp(value, min, max) * 10 + .5) / 10
         local fraction = (value - min) / (max - min)
-        title.Text = label .. "  " .. tostring(value)
+        valueLabel.Text = tostring(value)
         fill.Size = UDim2.fromScale(fraction, 1)
         knob.Position = UDim2.fromScale(fraction, .5)
         callback(value)
@@ -174,7 +194,7 @@ section("MOVEMENT")
 slider("Walk speed", 16, 100, 16, function(value) walkSpeed = value end)
 slider("Fly speed", 10, 150, 50, function(value) flySpeed = value end)
 slider("Jump height", 7.2, 60, 7.2, function(value) jumpHeight = value end)
-local flyRow = row(36)
+local flyRow = row(42)
 local flyButton
 flyButton = button(flyRow, "FLY: OFF", nil, nil, function()
     if flying then
@@ -228,203 +248,20 @@ connect(RunService.Heartbeat, function()
     end
 end)
 connect(player.CharacterAdded, function() stopFly(); flyButton.Text = "FLY: OFF" end)
-section("BUILDING")
--- Touch-friendly building controls operate on models owned by the player.
-local moveSelected, deleteSelected, rotateSelected
-local function beginSelection(mode)
-    selectedStructure = nil
-    if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
-    selectingStructure = true
-    selectionMode = mode
-    tell(mode == "structure" and "Tap a placed structure that you own." or "Tap an object or log that you own.")
-end
-local bRow = row(36)
-button(bRow, "BTOOLS: SELECT OBJECT", nil, nil, function() beginSelection("object") end)
-local selectRow = row(36)
-button(selectRow, "SELECT PLACED STRUCTURE", nil, nil, function() beginSelection("structure") end)
-connect(UserInputService.InputBegan, function(input, processed)
-    if (not selectingStructure and not activeBtool) or processed then return end
-    if input.UserInputType ~= Enum.UserInputType.Touch and input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
-    local toolAction = not selectingStructure and activeBtool or nil
-    local mode = toolAction == "rotate" and "structure" or (toolAction and "object" or selectionMode)
-    local cameraNow = workspace.CurrentCamera
-    local models = workspace:FindFirstChild("PlayerModels")
-    local logs = workspace:FindFirstChild("LogModels")
-    if not cameraNow or (mode == "structure" and not models) or (not models and not logs) then
-        tell("Placed objects are unavailable."); return
-    end
-    local ray = cameraNow:ScreenPointToRay(input.Position.X, input.Position.Y)
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = player.Character and {player.Character} or {}
-    local hit = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
-    local model = hit and hit.Instance
-    while model and model ~= workspace and model.Parent ~= models and (not logs or model.Parent ~= logs) do model = model.Parent end
-    local owner = model and model:FindFirstChild("Owner")
-    local kind = model and model:FindFirstChild("Type")
-    local inOwnedFolder = model and (model.Parent == models or (logs and model.Parent == logs))
-    local structure = model and model:IsA("Model") and model.Parent == models and kind and kind.Value == "Structure" and model.PrimaryPart
-    if not inOwnedFolder or not model:IsA("Model") or not owner or owner.Value ~= player or (mode == "structure" and not structure) then
-        tell(mode == "structure" and "Tap one of your own placed structures." or "Tap one of your own objects or logs.")
-        return
-    end
-    selectingStructure = false
-    selectedStructure = model
-    if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
-    selectionHighlight = make("Highlight", {Adornee = model, FillTransparency = .7, OutlineColor = colors.accent, DepthMode = Enum.HighlightDepthMode.AlwaysOnTop}, model)
-    local item = model:FindFirstChild("ItemName") or model:FindFirstChild("TreeClass")
-    tell("Selected " .. (item and tostring(item.Value) or "object") .. ".")
-    if toolAction == "move" then moveSelected()
-    elseif toolAction == "delete" then deleteSelected()
-    elseif toolAction == "rotate" then rotateSelected() end
-end)
-local function selectedOwnedObject()
-    local model = selectedStructure
-    local owner = model and model:FindFirstChild("Owner")
-    if not model or not model.Parent or not owner or owner.Value ~= player then return nil end
-    return model
-end
-moveSelected = function()
-    local model = selectedOwnedObject()
-    local _, _, root = characterParts()
-    if not model or not root then tell("Select your object first."); return end
-    local kind = model:FindFirstChild("Type")
-    if kind and kind.Value == "Structure" then
-        local placement = ReplicatedStorage:FindFirstChild("PlaceStructure")
-        local remote = placement and placement:FindFirstChild("ClientPlacedStructure")
-        if not model.PrimaryPart or not remote or not remote:IsA("RemoteEvent") then tell("Structure move is unavailable."); return end
-        local target = (root.CFrame * CFrame.new(0, 0, -6)).Position
-        local current = model.PrimaryPart.CFrame
-        remote:FireServer(nil, current - current.Position + target, player, nil, model, true)
-        tell("Structure move requested. Check whether the server accepted it.")
-        return
-    end
-    local interaction = ReplicatedStorage:FindFirstChild("Interaction")
-    local ownership = interaction and interaction:FindFirstChild("ClientRequestOwnership")
-    local drag = interaction and interaction:FindFirstChild("ClientIsDragging")
-    local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
-    if not ownership or not ownership:IsA("RemoteEvent") or not drag or not drag:IsA("RemoteEvent") or not part then
-        tell("Object move is unavailable."); return
-    end
-    local destination = (root.CFrame * CFrame.new(0, 3, -6)).Position
-    tell("Moving selected object...")
-    task.spawn(function()
-        local moved = false
-        local ok, err = pcall(function()
-            for _ = 1, 20 do
-                if not running or not model.Parent or not part:IsDescendantOf(model) or not selectedOwnedObject() or selectedStructure ~= model then break end
-                ownership:FireServer(model)
-                ownership:FireServer(part)
-                drag:FireServer(model)
-                model:PivotTo(model:GetPivot() + (destination - part.Position))
-                moved = true
-                task.wait(.1)
-            end
-        end)
-        if not ok then tell("Object move failed: " .. tostring(err))
-        elseif moved then tell("Object move requested. Check whether the server accepted it.")
-        else tell("Object move cancelled.") end
-    end)
-end
-deleteSelected = function()
-    local model = selectedOwnedObject()
-    if not model then tell("Select your object first."); return end
-    local interaction = ReplicatedStorage:FindFirstChild("Interaction")
-    local remote = interaction and interaction:FindFirstChild("DestroyStructure")
-    if not remote or not remote:IsA("RemoteEvent") then tell("Object deletion is unavailable."); return end
-    local ok, err = pcall(function()
-        local ownership = interaction:FindFirstChild("ClientRequestOwnership")
-        local drag = interaction:FindFirstChild("ClientIsDragging")
-        local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
-        if ownership and part then ownership:FireServer(part) end
-        if drag then drag:FireServer(model) end
-        remote:FireServer(model)
-    end)
-    if not ok then tell("Delete failed: " .. tostring(err)); return end
-    selectedStructure = nil
-    if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
-    tell("Delete requested. Check whether the server accepted it.")
-end
-rotateSelected = function()
-    local model = selectedStructure
-    local owner = model and model:FindFirstChild("Owner")
-    local kind = model and model:FindFirstChild("Type")
-    if not model or not model.Parent or not model.PrimaryPart or not owner or owner.Value ~= player or not kind or kind.Value ~= "Structure" then
-        tell("Select one of your placed structures first.")
-        return
-    end
-    local placement = ReplicatedStorage:FindFirstChild("PlaceStructure")
-    local remote = placement and placement:FindFirstChild("ClientPlacedStructure")
-    if not remote or not remote:IsA("RemoteEvent") then tell("Structure placement remote unavailable."); return end
-    local rotated = model.PrimaryPart.CFrame * CFrame.Angles(0, math.rad(90), 0)
-    remote:FireServer(nil, rotated, player, nil, model, true)
-    selectedStructure = nil
-    if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
-    tell("Rotation requested. Select the structure again to rotate it further.")
-end
-local toolRow = row(36)
-button(toolRow, "MOVE TO ME", UDim2.new(0, 0, 0, 0), UDim2.new(.5, -4, 1, 0), moveSelected)
-button(toolRow, "DELETE", UDim2.new(.5, 4, 0, 0), UDim2.new(.5, -4, 1, 0), deleteSelected)
-local rotateRow = row(36)
-button(rotateRow, "ROTATE SELECTED 90°", nil, nil, rotateSelected)
-local function createHotbarTools(backpack)
-    activeBtool = nil
-    for _, connection in ipairs(hotbarConnections) do connection:Disconnect() end
-    for _, tool in ipairs(hotbarTools) do tool:Destroy() end
-    hotbarConnections, hotbarTools = {}, {}
-    local definitions = {
-        {name = "LT2 Move", action = "move", tip = "Tap your object to move it to you"},
-        {name = "LT2 Delete", action = "delete", tip = "Tap your object to request deletion"},
-        {name = "LT2 Rotate", action = "rotate", tip = "Tap your structure to rotate it"},
-    }
-    for _, definition in ipairs(definitions) do
-        local tool = make("Tool", {Name = definition.name, ToolTip = definition.tip, RequiresHandle = false, CanBeDropped = false}, backpack)
-        table.insert(hotbarTools, tool)
-        table.insert(hotbarConnections, tool.Equipped:Connect(function()
-            activeBtool = definition.action
-            selectingStructure = false
-            tell(definition.tip .. ".")
-        end))
-        table.insert(hotbarConnections, tool.Unequipped:Connect(function()
-            if activeBtool == definition.action then activeBtool = nil end
-        end))
-    end
-end
-local function giveHotbarTools()
-    local backpack = player:FindFirstChildOfClass("Backpack")
-    if not backpack then tell("Wait for your backpack to load."); return end
-    if btoolsEnabled and #hotbarTools == 3 then
-        local allPresent = true
-        for _, tool in ipairs(hotbarTools) do
-            if tool.Parent ~= backpack and tool.Parent ~= player.Character then allPresent = false; break end
-        end
-        if allPresent then tell("BTOOLS are already in your hotbar or backpack."); return end
-    end
-    createHotbarTools(backpack)
-    btoolsEnabled = true
-    tell("BTOOLS added. Equip one, then tap your object.")
-end
-local hotbarRow = row(36)
-button(hotbarRow, "ADD BTOOLS TO HOTBAR", nil, nil, giveHotbarTools)
-connect(player.CharacterAdded, function(character)
-    if not btoolsEnabled then return end
-    task.spawn(function()
-        local backpack = player:WaitForChild("Backpack", 10)
-        if running and player.Character == character and backpack then createHotbarTools(backpack) end
-    end)
-end)
 section("BRING TREE")
 -- Only logs that appear after the tools start can be identified as recent.
 local recentLog, logFolder, pendingCut
 local logSequence, recentSequence = 0, 0
 local treeTypes = {{"Oak", "Generic"}, {"Cherry", "Cherry"}, {"Gold", "GoldSwampy"}, {"Cavecrawler", "CaveCrawler"}, {"Frost", "Frost"}, {"Lava", "Volcano"}, {"Elm", "Oak"}, {"Walnut", "Walnut"}, {"Birch", "Birch"}, {"Snowglow", "SnowGlow"}, {"Pine", "GreenSwampy"}, {"Koa", "Koa"}, {"Palm", "Palm"}, {"Spook", "Spooky"}, {"Sinister", "SpookyNeon"}, {"End Times", "LoneCave"}}
 local treeIndex = 1
-local treeRow = row(36)
-local treeLabel = button(treeRow, "TREE: Oak", UDim2.new(0, 0, 0, 0), UDim2.new(.7, -4, 1, 0), nil)
-button(treeRow, "NEXT ›", UDim2.new(.7, 4, 0, 0), UDim2.new(.3, -4, 1, 0), function()
-    treeIndex = treeIndex % #treeTypes + 1
+local treeRow = row(42)
+local treeLabel = button(treeRow, "TREE: Oak", UDim2.new(0, 0, 0, 0), UDim2.new(.55, -4, 1, 0), nil)
+local function changeTree(delta)
+    treeIndex = (treeIndex - 1 + delta) % #treeTypes + 1
     treeLabel.Text = "TREE: " .. treeTypes[treeIndex][1]
-end)
+end
+button(treeRow, "‹", UDim2.new(.55, 0, 0, 0), UDim2.new(.15, -4, 1, 0), function() changeTree(-1) end)
+button(treeRow, "NEXT ›", UDim2.new(.70, 0, 0, 0), UDim2.new(.30, 0, 1, 0), function() changeTree(1) end)
 local axeDamage = {Beesaxe=1.4, AxeAmber=3.39, ManyAxe=10.2, BasicHatchet=.2, Axe1=.55, Axe2=.93, AxeAlphaTesters=1.5, Rukiryaxe=1.68, Axe3=1.45, AxeBetaTesters=1.45, FireAxe=.6, SilverAxe=1.6, EndTimesAxe=1.58, AxeChicken=.9, AxeTwitter=1.65, CandyCornAxe=1.75}
 
 local function watchLogs(folder)
@@ -470,7 +307,10 @@ connect(workspace.ChildRemoved, function(child)
 end)
 watchLogs(workspace:FindFirstChild("LogModels"))
 
+-- Sum wood section volumes to compare trees without counting their leaves.
+-- Only trees currently replicated to this client can be inspected.
 local function findTree(treeClass)
+    local largestTree, largestWood, largestVolume
     for _, region in ipairs(workspace:GetChildren()) do
         if region.Name == "TreeRegion" then
             for _, candidate in ipairs(region:GetChildren()) do
@@ -480,11 +320,21 @@ local function findTree(treeClass)
                 if candidate:IsA("Model") and class and class:IsA("StringValue") and class.Value == treeClass
                     and candidate:FindFirstChild("CutEvent") and wood and wood:IsA("BasePart")
                     and (not owner or (owner:IsA("ObjectValue") and (owner.Value == nil or owner.Value == player))) then
-                    return candidate, wood
+                    local volume = 0
+                    for _, part in ipairs(candidate:GetDescendants()) do
+                        if part.Name == "WoodSection" and part:IsA("BasePart") then
+                            local size = part.Size
+                            volume = volume + size.X * size.Y * size.Z
+                        end
+                    end
+                    if not largestVolume or volume > largestVolume then
+                        largestTree, largestWood, largestVolume = candidate, wood, volume
+                    end
                 end
             end
         end
     end
+    return largestTree, largestWood
 end
 
 local function bringTree(automatic)
@@ -599,7 +449,8 @@ local function startTreeRequest(automatic)
         end
     end)
 end
-local bringRow = row(36)
-button(bringRow, "BRING ONE TREE", nil, nil, function() startTreeRequest(true) end)
-local recentRow = row(36)
+local bringRow = row(42)
+local bringButton = button(bringRow, "BRING ONE TREE", nil, nil, function() startTreeRequest(true) end)
+bringButton.BackgroundColor3 = colors.primary
+local recentRow = row(42)
 button(recentRow, "BRING RECENT TREE", nil, nil, function() startTreeRequest(false) end)
