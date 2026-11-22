@@ -795,6 +795,7 @@ local function updateMovement()
 end
 F.connect(player.CharacterAdded,function() F.stopFly(); features.movement.failed = false end)
 function F.cleanupFeatures()
+    if F.stopFollow then F.stopFollow(true) end
     if features.activity then features.activity.enabled, features.activity.records = false, {} end
     features.treeJob = (features.treeJob or 0)+1
     features.pendingCut = nil
@@ -830,6 +831,7 @@ function F.sampleActivity()
     local function alert(target, state, reason)
         if state.lastAlert and now-state.lastAlert < 30 then return end
         state.lastAlert = now
+        monitor.lastTarget = target
         local name = tostring(target.Name):sub(1,24)
         UI.activityReadout.Text = name .. ": " .. reason .. ". This is not proof of cheating."
         if not monitor.lastNotice or now-monitor.lastNotice >= 5 then
@@ -894,6 +896,161 @@ function F.sampleActivity()
         end
     end
     for target in pairs(monitor.records) do if not present[target] then monitor.records[target] = nil end end
+end
+
+-- Camera follow is local and only uses characters visible to this client.
+features.follow = {active=false,elapsed=0}
+local function followPlayers()
+    local list = {}
+    for _, other in ipairs(Players:GetPlayers()) do
+        if other ~= player then list[#list+1] = other end
+    end
+    table.sort(list,function(a,b) return a.Name:lower() < b.Name:lower() end)
+    return list
+end
+local function followPresent(target)
+    if not target then return false end
+    for _, other in ipairs(Players:GetPlayers()) do if other == target then return true end end
+    return false
+end
+local function ownHumanoid()
+    return player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+end
+function F.restoreFollowCamera()
+    local view = features.follow
+    local camera = view.camera
+    if not camera then return false end
+    local subject = view.wasLocal and ownHumanoid() or view.previousSubject
+    if not subject or not subject.Parent then subject = ownHumanoid() end
+    local restored = subject and subject.Parent ~= nil
+    local ok, err = pcall(function()
+        if restored then camera.CameraSubject = subject end
+        if view.previousType then camera.CameraType = view.previousType end
+    end)
+    view.camera, view.previousSubject, view.previousType, view.wasLocal = nil,nil,nil,nil
+    if not ok then warn("[Evian Hub] Restore camera:",err) end
+    return ok and restored or false
+end
+function F.stopFollow(quiet)
+    local view = features.follow
+    if not view.active then return end
+    view.active, view.elapsed, view.missingAt = false,0,nil
+    local camera = workspace.CurrentCamera
+    local replacementRestored = false
+    if camera and camera ~= view.camera then
+        local ok, err = pcall(function()
+            if camera.CameraSubject == view.lastSubject then
+                local own = ownHumanoid()
+                if own and own.Parent then camera.CameraSubject = own; replacementRestored = true end
+                if view.previousType then camera.CameraType = view.previousType end
+            end
+        end)
+        if not ok then warn("[Evian Hub] Restore replacement camera:",err) end
+    end
+    local restored = F.restoreFollowCamera() or replacementRestored
+    view.lastSubject = nil
+    if UI.followButton then UI.followButton.Text = "Start following" end
+    if UI.followStatus then UI.followStatus.Text = restored and "Your camera is restored."
+        or "Follow stopped. Wait for your character to load." end
+    if S.alive and F.telemetry then F.telemetry() end
+    if not quiet then F.notify(restored and "Camera returned to your view."
+        or "Follow stopped. Wait for your character to load.") end
+    return restored
+end
+function F.updateFollow()
+    local view = features.follow
+    if not view.active then return end
+    if not followPresent(view.selected) then
+        F.stopFollow(true)
+        view.selected = nil
+        UI.followName.Text = "No player selected"
+        F.notify("The followed player left the server.")
+        return
+    end
+    local camera = workspace.CurrentCamera
+    local character = view.selected.Character
+    local targetHumanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not camera or not targetHumanoid or targetHumanoid.Health <= 0 then
+        if not view.missingAt then view.missingAt = os.clock() end
+        if camera and camera == view.camera then
+            local own = ownHumanoid()
+            if own and own.Parent and camera.CameraSubject ~= own then camera.CameraSubject = own end
+        end
+        UI.followStatus.Text = "Waiting for " .. view.selected.Name .. " to load…"
+        if os.clock()-view.missingAt >= 20 then
+            local restored = F.stopFollow(true)
+            F.notify(restored and "Player is unavailable; camera returned to your view."
+                or "Player unavailable. Wait for your character to load.")
+        end
+        return
+    end
+    view.missingAt = nil
+    if camera ~= view.camera then
+        local replacing = view.camera ~= nil
+        F.restoreFollowCamera()
+        local previous = camera.CameraSubject
+        local own = ownHumanoid()
+        -- A replacement camera can inherit the spectated subject from the old one.
+        if replacing and (previous == view.lastSubject or previous == targetHumanoid) then previous = own end
+        view.camera, view.previousSubject, view.previousType = camera,previous,camera.CameraType
+        view.wasLocal = previous == own
+    end
+    if camera.CameraType ~= Enum.CameraType.Custom then camera.CameraType = Enum.CameraType.Custom end
+    if camera.CameraSubject ~= targetHumanoid then camera.CameraSubject = targetHumanoid end
+    view.lastSubject = targetHumanoid
+    UI.followStatus.Text = "Following " .. view.selected.Name .. ". Distant areas may not load."
+end
+function F.tryFollowUpdate()
+    local ok, err = pcall(F.updateFollow)
+    if not ok then
+        F.stopFollow(true)
+        warn("[Evian Hub] Follow camera:",err)
+        F.notify("Camera follow stopped.",true,{code="P02",details="Step: follow player\nCause: " .. F.errorText(err)})
+    end
+    return ok
+end
+function F.startFollow(target)
+    local view = features.follow
+    if not followPresent(target) then F.notify("Select a player who is still in the server."); return end
+    local camera = workspace.CurrentCamera
+    local character = target.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not camera or not humanoid or humanoid.Health <= 0 then
+        F.notify("That player's character is not currently loaded."); return
+    end
+    view.selected, view.missingAt = target,nil
+    UI.followName.Text = target.Name
+    if not view.active then view.active, view.elapsed = true,0 end
+    UI.followButton.Text = "Stop following"
+    if not F.tryFollowUpdate() then return end
+    if F.telemetry then F.telemetry() end
+    F.notify("Following " .. target.Name .. ".")
+end
+function F.changeFollow(delta)
+    local view, choices = features.follow, followPlayers()
+    if #choices == 0 then
+        if view.active then F.stopFollow(true) end
+        view.selected = nil
+        UI.followName.Text, UI.followStatus.Text = "No other players", "No player is available to follow."
+        return
+    end
+    local index = delta > 0 and 0 or 1
+    for i, other in ipairs(choices) do if other == view.selected then index = i; break end end
+    local selected = choices[(index-1+delta) % #choices+1]
+    view.selected, view.missingAt = selected,nil
+    UI.followName.Text = selected.Name
+    if view.active then F.tryFollowUpdate() else UI.followStatus.Text = "Selected " .. selected.Name .. "." end
+end
+function F.toggleFollow()
+    local view = features.follow
+    if view.active then F.stopFollow(); return end
+    if not followPresent(view.selected) then F.changeFollow(1) end
+    if view.selected then F.startFollow(view.selected) end
+end
+function F.followLastAlert()
+    local target = features.activity.lastTarget
+    if not followPresent(target) then F.notify("No recent player alert is available."); return end
+    F.startFollow(target)
 end
 
 local function findTree(treeClass)
@@ -1046,6 +1203,17 @@ textBlock(activityCard,"Watches loaded players. Unusual movement is not proof of
 UI.activityButton = button(activityCard,"Movement monitor: OFF",size(1,-24,0,35),off(12,87),function() F.toggleActivity() end,"selected")
 UI.activityReadout = textBlock(card("Player","Latest activity",nil,91,"suspicious activity alerts"),
     "Monitor off. Alerts are observations, not proof.",33,50)
+local lastAlertRow = row("Player","Follow latest alert",40)
+button(lastAlertRow,"Follow latest alert",size(1,0,1,0),nil,function() F.followLastAlert() end)
+register("Player","Follow latest alert",lastAlertRow,"spy spectate suspicious activity")
+local followCard = card("Player","Follow player",nil,190,"spy camera spectate watch")
+textBlock(followCard,"Follow a player with your camera. Distant areas may not load.",33,34)
+button(followCard,"‹",off(38,35),off(12,70),function() F.changeFollow(-1) end).Name = "Previous player"
+UI.followName = label(followCard,"No player selected",13,"text",size(1,-112,0,35),off(56,70),true)
+UI.followName.TextXAlignment = Enum.TextXAlignment.Center
+button(followCard,"›",off(38,35),size(1,-50,0,70),function() F.changeFollow(1) end).Name = "Next player"
+UI.followButton = button(followCard,"Start following",size(1,-24,0,35),off(12,112),function() F.toggleFollow() end,"selected")
+UI.followStatus = textBlock(followCard,"Your camera is on your character.",154,30)
 for _, name in ipairs({"Building","Automation","Visuals"}) do
     heading(name,name)
     card(name,"No features configured","Features for this category will appear when they are specified.",82)
@@ -1884,6 +2052,7 @@ function F.telemetry()
     local activeFeatures = {}
     if features.movement.flying then activeFeatures[#activeFeatures+1] = "Flight" end
     if features.activity.enabled then activeFeatures[#activeFeatures+1] = "Movement monitor" end
+    if features.follow.active then activeFeatures[#activeFeatures+1] = "Following player" end
     if features.treeBusy then activeFeatures[#activeFeatures+1] = "Tree request" end
     local summary = #activeFeatures > 0 and table.concat(activeFeatures, ", ") or "No automation running"
     UI.overview.Text = (features.trees and "Tree comparison available • " or "Tree comparison awaiting LT2 regions • ") .. summary
@@ -1923,6 +2092,14 @@ F.connect(RunService.Heartbeat,function(dt)
                 warn("[Evian Hub] Movement monitor:",err)
                 F.notify("Movement monitor stopped.",true,{code="P01",details="Step: check players\nCause: " .. F.errorText(err)})
             end
+        end
+    end
+    local view = features.follow
+    if view.active then
+        view.elapsed = view.elapsed + dt
+        if view.elapsed >= .25 then
+            view.elapsed = 0
+            F.tryFollowUpdate()
         end
     end
     if not S.open and #features.pendingLogs == 0 then return end
