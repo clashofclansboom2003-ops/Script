@@ -1182,6 +1182,369 @@ end
 F.detect()
 F.watchLogs()
 
+-- Tree splitting and sawmill processing use LT2's replicated wood metadata.
+-- The client only reports observed changes; server acceptance remains authoritative.
+do
+    local operation
+    local panel = frame(UI.root,"Wood action prompt","card",size(1,-24,0,150),off(12,10))
+    panel.Visible, panel.Active, panel.ZIndex = false, true, 10
+    corner(panel,9); border(panel,"accent")
+    make("UISizeConstraint",{MaxSize = Vector2.new(380,150)},panel)
+    local title = label(panel,"",14,"accent",size(1,-24,0,21),off(12,8),true)
+    local prompt = label(panel,"",12,"text",size(1,-24,0,62),off(12,33))
+    prompt.TextWrapped, prompt.TextTruncate, prompt.TextYAlignment = true, Enum.TextTruncate.None, Enum.TextYAlignment.Top
+    local confirm = button(panel,"Confirm",off(100,34),off(12,105),function()
+        if operation and operation.stage == "confirm" then operation.confirmed = true end
+    end,"selected")
+    confirm.Name = "Confirm wood selection"
+    local cancel = button(panel,"Cancel",off(90,34),off(120,105),function()
+        if operation then operation.cancelled = true end
+    end)
+    cancel.Name = "Cancel wood action"
+    local mills = {Sawmill=true,Sawmill2=true,Sawmill3=true,Sawmill4=true,Sawmill4L=true}
+
+    local function setStage(op, stage, message)
+        op.stage, op.acceptAt = stage, os.clock()+.3
+        prompt.Text = message
+        confirm.Visible = stage == "confirm"
+    end
+    local function clearHighlight(op)
+        if op.highlight then op.highlight:Destroy(); op.highlight = nil end
+    end
+    local function woodSections(model)
+        local sections, ids = {}, {}
+        for _, part in ipairs(model:GetChildren()) do
+            if part.Name == "WoodSection" and part:IsA("BasePart") then
+                local id = part:FindFirstChild("ID")
+                if not id or (not id:IsA("IntValue") and not id:IsA("NumberValue"))
+                    or type(id.Value) ~= "number" or id.Value ~= id.Value or ids[id.Value] then return nil end
+                ids[id.Value] = true
+                sections[#sections+1] = {part=part,id=id.Value}
+            end
+        end
+        table.sort(sections,function(a,b) return a.id < b.id end)
+        return sections
+    end
+    local function treeModel(hit)
+        local node, logs = hit, workspace:FindFirstChild("LogModels")
+        while node and node ~= workspace do
+            local parent = node.Parent
+            local standing = parent and parent.Name == "TreeRegion" and parent.Parent == workspace
+            if node:IsA("Model") and (standing or parent == logs) then
+                local species, event = node:FindFirstChild("TreeClass"), node:FindFirstChild("CutEvent")
+                local wood = node:FindFirstChild("WoodSection")
+                if species and species:IsA("StringValue") and species.Value ~= "" and event and wood and wood:IsA("BasePart") then
+                    return node, standing, species.Value
+                end
+                return
+            end
+            node = parent
+        end
+    end
+    local function sawmillModel(hit)
+        local node, models = hit, workspace:FindFirstChild("PlayerModels")
+        while node and node ~= workspace do
+            if node.Parent == models and node:IsA("Model") then
+                local item, kind = node:FindFirstChild("ItemName"), node:FindFirstChild("Type")
+                if not item or not item:IsA("StringValue") or not mills[item.Value]
+                    or not kind or not kind:IsA("StringValue") or kind.Value ~= "Structure" then return end
+                local inlet = node:FindFirstChild("Particles")
+                if not inlet or not inlet:IsA("BasePart") then
+                    local conveyor = node:FindFirstChild("Conveyor")
+                    inlet = conveyor and conveyor:FindFirstChild("Conveyor")
+                end
+                if inlet and inlet:IsA("BasePart") then return node, inlet, item.Value end
+                return
+            end
+            node = node.Parent
+        end
+    end
+    local function finish(op, message, code, detail)
+        if operation ~= op then return end
+        clearHighlight(op)
+        if op.logConnection then op.logConnection:Disconnect(); op.logConnection = nil end
+        if op.outputConnection then op.outputConnection:Disconnect(); op.outputConnection = nil end
+        if op.moved and op.original and op.root and op.root.Parent and player.Character == op.character then
+            local ok, err = pcall(function() op.root.CFrame = op.original end)
+            if not ok then warn("[Evian Hub] Wood action return:",err) end
+        end
+        operation = nil
+        features.treeBusy = false
+        panel.Visible = false
+        if not S.alive then return end
+        F.show(true)
+        if message then
+            local context = "Step: " .. op.step .. "\nTree: " .. (op.species or "not selected")
+                .. " • Mill: " .. (op.millName or "not selected")
+                .. "\nAxe: " .. (op.axeName or "unknown")
+                .. "\nCause: " .. F.errorText(detail or "Check LT2 objects and try again.")
+            F.notify(message,code ~= nil,code and {code=code,details=context} or nil)
+        end
+    end
+    local function active(op)
+        return S.alive and operation == op and not op.cancelled and player.Character == op.character
+            and op.root.Parent and op.humanoid.Health > 0
+    end
+    local function waitSelection(op, stage, message)
+        op.selected, op.confirmed = nil, false
+        setStage(op,stage,message)
+        local deadline = os.clock()+60
+        while active(op) and os.clock() < deadline and not op.confirmed do task.wait(.1) end
+        clearHighlight(op)
+        if not active(op) then return nil,"cancelled" end
+        if not op.confirmed then return nil,"Selection timed out." end
+        return op.selected
+    end
+    local function choose(position, processed)
+        local op = operation
+        if processed or not op or S.open or Input:GetFocusedTextBox() or S.pointer
+            or os.clock() < (op.acceptAt or 0) or (op.stage ~= "tree" and op.stage ~= "mill") then return end
+        local camera = workspace.CurrentCamera
+        if not camera then prompt.Text = "Camera unavailable. Wait for it to load or cancel."; return end
+        local ray = camera:ViewportPointToRay(position.X,position.Y)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = op.character and {op.character} or {}
+        local result = workspace:Raycast(ray.Origin,ray.Direction*500,params)
+        local hit = result and result.Instance
+        local model, extra, name
+        if op.stage == "tree" then
+            model, extra, name = treeModel(hit)
+        else
+            model, extra, name = sawmillModel(hit)
+        end
+        if not model then
+            prompt.Text = op.stage == "tree" and "Tap a standing tree or a cut tree with wood sections."
+                or "Tap a placed sawmill with a recognised input."
+            return
+        end
+        op.selected = {model=model,extra=extra,name=name}
+        clearHighlight(op)
+        op.highlight = make("Highlight",{Adornee=model,FillTransparency=.8,OutlineColor=F.color("accent")},model)
+        setStage(op,"confirm","Selected " .. name .. ". Check the highlight, then tap Confirm or Cancel.")
+    end
+    local function safeChoose(position, processed)
+        local ok, err = pcall(choose,position,processed)
+        if not ok and operation then
+            warn("[Evian Hub] Wood selection:",err)
+            local op = operation
+            finish(op,"Could not select that object.","W03","Cause: " .. F.errorText(err))
+        end
+    end
+    F.connect(Input.TouchTapInWorld,safeChoose)
+    F.connect(Input.InputBegan,function(input,processed)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then safeChoose(input.Position,processed) end
+    end)
+    F.connect(player.CharacterAdded,function() if operation then operation.cancelled = true end end)
+    local oldCleanup = F.cleanupFeatures
+    function F.cleanupFeatures()
+        if operation then operation.cancelled = true; finish(operation) end
+        oldCleanup()
+    end
+
+    -- A new log must be near the targeted section and retain its section ID.
+    -- This avoids taking an unrelated log produced by another cut nearby.
+    local function cut(op, model, section, height)
+        local event = model.Parent and model:FindFirstChild("CutEvent")
+        if not event or section.part.Parent ~= model then return nil,"The selected section is no longer available." end
+        local species = model:FindFirstChild("TreeClass")
+        local axe = op.character:FindFirstChildOfClass("Tool")
+        if not species or not species:IsA("StringValue") or not axe then return nil,"Equip an axe before cutting." end
+        local damage, cooldown, interval, reason = axeStats(axe,species.Value)
+        if not damage then return nil,"Axe data unavailable: " .. tostring(reason) end
+        local position, candidates, seenAt, started = section.part.Position, {}, nil, false
+        local connection = op.logs.ChildAdded:Connect(function(log)
+            if started then candidates[#candidates+1] = log end
+        end)
+        op.logConnection = connection
+        op.moved = true
+        op.root.CFrame = section.part.CFrame + Vector3.new(4,2,2)
+        task.wait(.3)
+        local deadline, nextSwing = os.clock()+20, 0
+        local found, ambiguous
+        while active(op) and os.clock() < deadline do
+            local match, matches = nil, 0
+            for _, candidate in ipairs(candidates) do
+                if candidate:IsA("Model") and candidate.Parent == op.logs then
+                    local owner, class = candidate:FindFirstChild("Owner"), candidate:FindFirstChild("TreeClass")
+                    local sections = woodSections(candidate)
+                    if owner and owner:IsA("ObjectValue") and owner.Value == player and class
+                        and class:IsA("StringValue") and class.Value == species.Value and sections then
+                        for _, piece in ipairs(sections) do
+                            if piece.id == section.id and (piece.part.Position-position).Magnitude <= 30 then
+                                match, matches = candidate, matches+1; break
+                            end
+                        end
+                    end
+                end
+            end
+            if matches > 1 then ambiguous = true; break end
+            if matches == 1 then
+                if match ~= found then found, seenAt = match, os.clock() end
+                if os.clock()-seenAt >= .5 then break end
+            else found, seenAt = nil, nil end
+            if axe.Parent ~= op.character then break end
+            if not found and model.Parent and section.part.Parent == model and event.Parent and os.clock() >= nextSwing then
+                started = true
+                op.proxy:FireServer(event,{tool=axe,faceVector=Vector3.new(1,0,0),height=height,
+                    sectionId=section.id,hitPoints=damage,cooldown=cooldown,cuttingClass="Axe"})
+                nextSwing = os.clock()+interval
+            end
+            task.wait(.1)
+        end
+        connection:Disconnect(); op.logConnection = nil
+        if not active(op) then return nil,"cancelled" end
+        if ambiguous then return nil,"Several nearby logs matched the cut; selection is ambiguous." end
+        if not found or not seenAt or os.clock()-seenAt < .5 then return nil,"No matching new log appeared within 20 seconds." end
+        return found
+    end
+    local function dismember(op, selection)
+        local initial = selection.model
+        local sections = initial.Parent and woodSections(initial)
+        if not sections or #sections == 0 then return nil,"Wood sections or their IDs are missing." end
+        if selection.extra then
+            op.step = "Cutting standing tree"
+            local felled, reason = cut(op,initial,sections[1],.3)
+            if not felled then return nil,reason end
+            initial = felled
+        end
+        local queue, output, seen = {initial}, {}, {}
+        while #queue > 0 do
+            if not active(op) then return nil,"cancelled" end
+            local model = table.remove(queue,1)
+            if not model.Parent then return nil,"A selected log disappeared during splitting." end
+            if seen[model] then return nil,"The server returned the same log twice." end
+            seen[model] = true
+            local pieces = woodSections(model)
+            if not pieces or #pieces == 0 then return nil,"A log has no readable wood section IDs." end
+            if #pieces == 1 then
+                output[#output+1] = model
+            else
+                -- Cutting the base of a non-root section separates its branch.
+                local target = pieces[2]
+                op.step = "Separating section " .. tostring(target.id)
+                prompt.Text = op.step .. "…"
+                local branch, reason = cut(op,model,target,0)
+                if not branch then return nil,reason end
+                task.wait(.5)
+                if not active(op) then return nil,"cancelled" end
+                local remainder = model.Parent and woodSections(model)
+                if not remainder or #remainder >= #pieces then
+                    return nil,"A new log appeared, but the selected tree did not update."
+                end
+                for _, remaining in ipairs(remainder) do
+                    if remaining.id == target.id then return nil,"The targeted section is still attached to the original tree." end
+                end
+                op.splits = (op.splits or 0)+1
+                seen[model] = nil
+                queue[#queue+1], queue[#queue+2] = model, branch
+                if #queue + #output > 200 then return nil,"Tree has too many sections to process safely." end
+            end
+        end
+        return output
+    end
+    local function feed(op, logs, mill)
+        local model, inlet = mill.model, mill.extra
+        local drag = remote(ReplicatedStorage:FindFirstChild("Interaction"),"ClientIsDragging")
+        local ownership = remote(ReplicatedStorage:FindFirstChild("Interaction"),"ClientRequestOwnership")
+        local models = workspace:FindFirstChild("PlayerModels")
+        if not drag or not models then return nil,"Drag remote or PlayerModels is unavailable." end
+        for i, log in ipairs(logs) do
+            if not active(op) then return nil,"cancelled" end
+            if not model.Parent or not inlet.Parent or not log.Parent then return nil,"The sawmill or a log disappeared." end
+            local section = log:FindFirstChild("WoodSection")
+            if not section or not section:IsA("BasePart") then return nil,"A log no longer has a wood section." end
+            local candidates = {}
+            op.outputConnection = models.ChildAdded:Connect(function(candidate) candidates[#candidates+1] = candidate end)
+            op.step = "Feeding log " .. i .. "/" .. #logs
+            prompt.Text = op.step .. "…"
+            op.moved = true
+            op.root.CFrame = section.CFrame + Vector3.new(4,2,2)
+            if ownership then ownership:FireServer(log); ownership:FireServer(section) end
+            task.wait(.5)
+            for _ = 1,8 do
+                if not active(op) or not log.Parent or not model.Parent or not inlet.Parent then break end
+                drag:FireServer(log)
+                log:PivotTo(log:GetPivot() + ((inlet.Position + Vector3.new(0,1,0))-section.Position))
+                op.root.CFrame = inlet.CFrame + Vector3.new(4,2,2)
+                task.wait(.25)
+            end
+            local deadline, observed = os.clock()+8, false
+            while active(op) and os.clock() < deadline do
+                for _, output in ipairs(candidates) do
+                    local owner, wood = output:FindFirstChild("Owner"), output:FindFirstChild("WoodSection")
+                    if output.Parent == models and output:FindFirstChild("RecentlyCut") and owner
+                        and owner:IsA("ObjectValue") and owner.Value == player and wood and wood:IsA("BasePart")
+                        and (wood.Position-inlet.Position).Magnitude <= 30 then observed = true; break end
+                end
+                if observed and not log.Parent then break end
+                task.wait(.1)
+            end
+            op.outputConnection:Disconnect(); op.outputConnection = nil
+            if not active(op) then return nil,"cancelled" end
+            if not observed or log.Parent then
+                return nil,"Could not confirm milling for log " .. i .. "/" .. #logs .. "."
+            end
+        end
+        return true
+    end
+    local function begin(mode)
+        local function report(message,detail)
+            F.notify(message,true,{code="W01",details="Step: starting wood action\n" .. detail})
+        end
+        if game.PlaceId ~= 13822889 then report("Open Lumber Tycoon 2 first.","Place: outside LT2"); return end
+        if features.treeBusy or operation then report("A tree action is already running.","Wait for it to finish or cancel it."); return end
+        local humanoid, root = characterParts()
+        local interaction, logs = ReplicatedStorage:FindFirstChild("Interaction"), workspace:FindFirstChild("LogModels")
+        local proxy = remote(interaction,"RemoteProxy")
+        if not humanoid or not root then report("Wait for your character to load.","Humanoid or root missing"); return end
+        if not logs or not proxy then report("Tree actions are unavailable.","LogModels or RemoteProxy missing"); return end
+        if not player.Character:FindFirstChildOfClass("Tool") then report("Equip an axe first.","No tool equipped"); return end
+        local equipped = player.Character:FindFirstChildOfClass("Tool")
+        local axeName = equipped:FindFirstChild("ToolName")
+        local op = {mode=mode,character=player.Character,humanoid=humanoid,root=root,original=root.CFrame,
+            logs=logs,proxy=proxy,step="Selecting tree",axeName=axeName and axeName:IsA("StringValue") and axeName.Value or equipped.Name}
+        operation, features.treeBusy = op, true
+        title.Text = mode == "mill" and "Auto Sawmill" or "Dismember Tree"
+        panel.Visible = true
+        F.stopFly(); F.show(false)
+        task.spawn(function()
+            local ok, result, detail = xpcall(function()
+                local selected, reason = waitSelection(op,"tree","Tap a tree or cut tree in the game, then confirm it.")
+                if not selected then return nil,reason end
+                if not selected.model.Parent then return nil,"The selected tree disappeared." end
+                op.species = selected.name
+                setStage(op,"working","Separating the selected tree…")
+                local pieces; pieces, reason = dismember(op,selected)
+                if not pieces then return nil,reason end
+                if mode ~= "mill" then
+                    if not op.splits then return "Selected tree already has one wood section." end
+                    return "Separated " .. #pieces .. " log(s)."
+                end
+                op.step = "Selecting sawmill"
+                local sawmill; sawmill, reason = waitSelection(op,"mill","Tap a placed sawmill in the game, then confirm it.")
+                if not sawmill then return nil,reason end
+                op.millName = sawmill.name
+                setStage(op,"working","Feeding logs into the sawmill…")
+                local done; done, reason = feed(op,pieces,sawmill)
+                if not done then return nil,reason end
+                return "Saw nearby output while feeding " .. #pieces .. " log(s). Check the results."
+            end,debug.traceback)
+            if not ok then
+                warn("[Evian Hub] Wood action:",result)
+                finish(op,"Wood action failed.","W99","Cause: " .. F.errorText(result))
+            elseif not active(op) or detail == "cancelled" then finish(op,"Wood action cancelled.")
+            elseif not result then finish(op,"Wood action could not finish.","W02",detail)
+            else finish(op,result) end
+        end)
+    end
+    local wood = "Wood & Trees"
+    local split = card(wood,"Dismember Tree","Select a tree to separate its wood sections.",114,"split joints logs")
+    button(split,"Select tree to dismember",size(1,-24,0,35),off(12,68),function() begin("split") end,"selected")
+    local saw = card(wood,"Auto Sawmill","Select a tree, then select a sawmill to process its logs.",114,"sawmill split logs")
+    button(saw,"Start Auto Sawmill",size(1,-24,0,35),off(12,68),function() begin("mill") end,"selected")
+end
+
 -- Customisation: preferences are data, controls only update their own setting.
 local settings = "Customisation"
 local renderSettings = {}
