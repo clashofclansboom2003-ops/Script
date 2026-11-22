@@ -320,19 +320,19 @@ function F.notify(message, isError, diagnostic)
         for _, item in ipairs(toasts) do if not toastErrors[item] then removeToast(item); break end end
     end
     toastSerial = toastSerial + 1
-    local card = frame(UI.notifications, "Notification", "card", size(1,0,0,isError and 177 or 60))
+    local card = frame(UI.notifications, "Notification", "card", size(1,0,0,isError and 170 or 54))
     card.LayoutOrder = toastSerial
     corner(card, 9); border(card)
     local accent = isError and "error" or "accent"
-    corner(frame(card, "Indicator", accent, off(3,isError and 155 or 38), off(8,11)), 2)
+    corner(frame(card, "Indicator", accent, off(3,isError and 150 or 34), off(8,10)), 2)
     local title = isError and ("ERROR " .. (diagnostic and diagnostic.code or "GENERAL")) or "EVIAN HUB"
     label(card, title, 10, accent, size(1,-56,0,16), off(18,6), true)
-    local msg = label(card, message, 12, "text", size(1,-28,0,isError and 34 or 33), off(18,isError and 36 or 22))
+    local msg = label(card, message, 12, "text", size(1,-28,0,isError and 34 or 28), off(18,isError and 36 or 21))
     msg.TextWrapped = true
     msg.TextYAlignment = Enum.TextYAlignment.Top
     if isError then
         msg.TextTruncate = Enum.TextTruncate.None
-        local detail = label(card, diagnostic and diagnostic.details or "See the game console for technical details.", 11, "muted", size(1,-28,0,93), off(18,75))
+        local detail = label(card, diagnostic and diagnostic.details or "See the game console for technical details.", 11, "muted", size(1,-28,0,93), off(18,70))
         detail.TextWrapped = true
         detail.TextYAlignment = Enum.TextYAlignment.Top
         detail.TextTruncate = Enum.TextTruncate.None
@@ -345,9 +345,7 @@ function F.notify(message, isError, diagnostic)
     end
     toasts[#toasts+1] = card
     resizeNotifications()
-    if not isError then
-        task.delay(5.5, function() if S.alive and card.Parent then removeToast(card) end end)
-    end
+    task.delay(3, function() if S.alive and card.Parent then removeToast(card) end end)
 end
 loading = frame(UI.notifications, "Loading", "card", size(1,0,0,65))
 resizeNotifications()
@@ -1186,18 +1184,18 @@ F.watchLogs()
 -- The client only reports observed changes; server acceptance remains authoritative.
 do
     local operation
-    local panel = frame(UI.root,"Wood action prompt","card",size(1,-24,0,150),off(12,10))
+    local panel = frame(UI.root,"Wood action prompt","card",size(1,-24,0,135),off(12,10))
     panel.Visible, panel.Active, panel.ZIndex = false, true, 10
     corner(panel,9); border(panel,"accent")
-    make("UISizeConstraint",{MaxSize = Vector2.new(380,150)},panel)
+    make("UISizeConstraint",{MaxSize = Vector2.new(340,135)},panel)
     local title = label(panel,"",14,"accent",size(1,-24,0,21),off(12,8),true)
-    local prompt = label(panel,"",12,"text",size(1,-24,0,62),off(12,33))
+    local prompt = label(panel,"",12,"text",size(1,-24,0,50),off(12,32))
     prompt.TextWrapped, prompt.TextTruncate, prompt.TextYAlignment = true, Enum.TextTruncate.None, Enum.TextYAlignment.Top
-    local confirm = button(panel,"Confirm",off(100,34),off(12,105),function()
+    local confirm = button(panel,"Confirm",off(100,34),off(12,91),function()
         if operation and operation.stage == "confirm" then operation.confirmed = true end
     end,"selected")
     confirm.Name = "Confirm wood selection"
-    local cancel = button(panel,"Cancel",off(90,34),off(120,105),function()
+    local cancel = button(panel,"Cancel",off(90,34),off(120,91),function()
         if operation then operation.cancelled = true end
     end)
     cancel.Name = "Cancel wood action"
@@ -1276,7 +1274,7 @@ do
         if message then
             local context = "Step: " .. op.step .. "\nTree: " .. (op.species or "not selected")
                 .. " • Mill: " .. (op.millName or "not selected")
-                .. "\nAxe: " .. (op.axeName or "unknown")
+                .. "\n" .. (op.input and ("Input: " .. op.input) or ("Axe: " .. (op.axeName or "unknown")))
                 .. "\nCause: " .. F.errorText(detail or "Check LT2 objects and try again.")
             F.notify(message,code ~= nil,code and {code=code,details=context} or nil)
         end
@@ -1465,7 +1463,10 @@ do
             for _ = 1,8 do
                 if not active(op) or not log.Parent or not model.Parent or not inlet.Parent then break end
                 drag:FireServer(log)
-                log:PivotTo(log:GetPivot() + ((inlet.Position + Vector3.new(0,1,0))-section.Position))
+                -- Aim at Particles when present; retain the conveyor surface offset as a fallback.
+                local target = inlet.Name == "Particles" and inlet.Position or inlet.Position + Vector3.new(0,1,0)
+                op.input = inlet.Name .. " • " .. coordinates(target)
+                log:PivotTo(log:GetPivot() + (target-section.Position))
                 op.root.CFrame = inlet.CFrame + Vector3.new(4,2,2)
                 task.wait(.25)
             end
