@@ -201,7 +201,7 @@ end
 local function button(parent, text, bounds, position, action, key)
     local b = make("TextButton", {Text = text, Size = bounds, Position = position or off(0,0),
         AutoButtonColor = false, Font = Enum.Font.GothamSemibold, TextSize = 13, TextTruncate = Enum.TextTruncate.AtEnd}, parent)
-    corner(b, 8)
+    corner(b, 7)
     F.style(b, "BackgroundColor3", key or "control")
     F.style(b, "TextColor3", "text")
     if action then
@@ -364,12 +364,12 @@ UI.group = make("CanvasGroup", {Size = size(1,0,1,0), Position = size(.5,0,.5,0)
     AnchorPoint = Vector2.new(.5,.5), BackgroundTransparency = 1}, UI.window)
 UI.scale = make("UIScale", {Scale = 1}, UI.group)
 local shell = frame(UI.group, "Shell", "shell", size(1,0,1,-4))
-corner(shell, 13); border(shell)
+corner(shell, 11); border(shell)
 shell.ZIndex = 2
 local shadow = frame(UI.group, "Window depth", "shadow", size(1,0,1,-2), off(0,2))
 shadow.BackgroundTransparency = .38
-corner(shadow, 13)
-local header = frame(shell, "Drag Header", nil, size(1,0,0,59))
+corner(shadow, 11)
+local header = frame(shell, "Drag Header", nil, size(1,0,0,56))
 header.Active = true
 logo(header, off(12,10))
 label(header, "Evian Hub", 19, "text", off(120,22), off(56,8), true)
@@ -377,13 +377,13 @@ local version = label(header, "v1.0", 10, "accent", off(42,18), off(165,10), tru
 local playerLine = label(header, player.Name, 11, "muted", size(1,-159,0,17), off(56,32))
 local gameLine = label(header, "", 11, "accent", off(180,22), size(1,-278,0,17))
 gameLine.TextXAlignment = Enum.TextXAlignment.Right
-local minimise = button(header, "−", off(36,36), size(1,-90,0,10), function() F.show(false) end)
-minimise.Name, minimise.TextSize = "Minimise", 20
-local close = button(header, "×", off(36,36), size(1,-47,0,10), function() F.confirmClose() end)
-close.Name, close.TextSize = "Close Hub", 20
-frame(shell, "Header divider", "line", size(1,0,0,1), off(0,58))
-UI.sidebar = frame(shell, "Sidebar", "side", size(0,156,1,-69), off(8,59))
-corner(UI.sidebar, 9)
+local minimise = button(header, "−", off(36,36), size(1,-90,0,10), function() F.show(false) end, "side")
+minimise.Name, minimise.TextSize = "Minimise", 18
+local close = button(header, "×", off(36,36), size(1,-47,0,10), function() F.confirmClose() end, "side")
+close.Name, close.TextSize = "Close Hub", 18
+frame(shell, "Header divider", "line", size(1,0,0,1), off(0,55))
+UI.sidebar = frame(shell, "Sidebar", "side", size(0,145,1,-66), off(8,56))
+corner(UI.sidebar, 8)
 UI.nav = make("ScrollingFrame", {Name = "Category list", Size = size(1,-8,1,-46), Position = off(4,4),
     BackgroundTransparency = 1, ScrollBarThickness = 2, AutomaticCanvasSize = Enum.AutomaticSize.Y,
     ScrollingDirection = Enum.ScrollingDirection.Y, CanvasSize = off(0,0)}, UI.sidebar)
@@ -400,17 +400,17 @@ local collapse = button(UI.sidebar, "‹  Collapse", size(1,-8,0,35), size(0,4,1
     end
 end)
 collapse.Name = "Collapse sidebar"
-UI.content = frame(shell, "Content", "body", size(1,-176,1,-106), off(168,59))
-corner(UI.content, 9)
+UI.content = frame(shell, "Content", "body", size(1,-167,1,-103), off(159,56))
+corner(UI.content, 8)
 
-local search = make("TextBox", {Name = "Search", Position = off(10,8), Size = size(1,-57,0,34),
+local search = make("TextBox", {Name = "Search", Position = off(10,8), Size = size(1,-57,0,32),
     PlaceholderText = "Search features and settings", Text = "", ClearTextOnFocus = false,
     Font = Enum.Font.Gotham, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left}, UI.content)
-corner(search, 8); border(search); F.style(search, "BackgroundColor3", "side")
+corner(search, 7); border(search); F.style(search, "BackgroundColor3", "side")
 F.style(search, "TextColor3", "text"); F.style(search, "PlaceholderColor3", "muted")
 make("UIPadding", {PaddingLeft = UDim.new(0,10), PaddingRight = UDim.new(0,8)}, search)
 button(UI.content, "×", off(30,34), size(1,-39,0,8), function() search.Text = ""; search:ReleaseFocus() end).Name = "Clear search"
-UI.pages = frame(UI.content, "Pages", nil, size(1,-20,1,-50), off(10,50))
+UI.pages = frame(UI.content, "Pages", nil, size(1,-20,1,-46), off(10,46))
 UI.status = label(shell, "", 11, "muted", size(1,-52,0,27), size(0,16,1,-33))
 UI.status.Name = "Status information"
 UI.grip = button(shell, "◢", off(32,32), size(1,-36,1,-36), nil, "side")
@@ -435,11 +435,11 @@ function F.layout()
     local narrow = S.narrowScreen and not S.mobileExpanded or (not S.narrowScreen and cfg.collapsed)
     S.iconOnly = narrow
     local fullNav = S.mobileExpanded and w < 365
-    local side = narrow and 51 or (fullNav and w-16 or (S.narrowScreen and 132 or 153))
+    local side = narrow and 49 or (fullNav and w-16 or (S.narrowScreen and 132 or 145))
     local bottom = cfg.status and 48 or 36
-    UI.sidebar.Size = size(0,side,1,-69)
-    UI.content.Position = off(side+14,59)
-    UI.content.Size = size(1,-side-22,1,-59-bottom)
+    UI.sidebar.Size = size(0,side,1,-66)
+    UI.content.Position = off(side+14,56)
+    UI.content.Size = size(1,-side-22,1,-56-bottom)
     UI.content.Visible = not fullNav
     UI.status.Visible = cfg.status and not fullNav
     UI.status.Position = size(0,side+16,1,-48)
@@ -552,8 +552,8 @@ local function page(name)
         BackgroundTransparency = 1, ScrollBarThickness = 3, CanvasSize = off(0,0),
         ScrollingDirection = Enum.ScrollingDirection.Y, AutomaticCanvasSize = Enum.AutomaticSize.Y}, UI.pages)
     F.style(list, "ScrollBarImageColor3", "accent")
-    make("UIPadding", {PaddingTop = UDim.new(0,2), PaddingBottom = UDim.new(0,13)}, list)
-    local flow = make("UIListLayout", {Padding = UDim.new(0,8), SortOrder = Enum.SortOrder.LayoutOrder}, list)
+    make("UIPadding", {PaddingTop = UDim.new(0,2), PaddingBottom = UDim.new(0,11)}, list)
+    local flow = make("UIListLayout", {Padding = UDim.new(0,6), SortOrder = Enum.SortOrder.LayoutOrder}, list)
     pages[name] = {list = list, flow = flow, order = 0}
     return list
 end
@@ -562,11 +562,11 @@ local function row(category, name, height, key)
     pageData.order = pageData.order + 1
     local item = frame(pageData.list, name, key, size(1,-3,0,height))
     item.LayoutOrder = pageData.order
-    if key then corner(item, 9); border(item) end
+    if key then corner(item, 8); border(item) end
     return item
 end
 local function heading(category, text)
-    label(row(category, text, 27), text, 16, "text", nil, nil, true)
+    label(row(category, text, 25), text, 16, "text", nil, nil, true)
 end
 local function textBlock(container, text, top, height)
     local textUI = label(container, text, 12, "muted", size(1,-24,0,height), off(12,top))
@@ -578,13 +578,13 @@ local function register(category, name, target, terms)
 end
 local function card(category, title, description, height, terms)
     local item = row(category, title, height or 91, "card")
-    label(item, title, 14, "text", size(1,-24,0,22), off(12,8), true)
-    if description then textBlock(item, description, 35, (height or 91)-41) end
+    label(item, title, 14, "text", size(1,-24,0,22), off(12,7), true)
+    if description then textBlock(item, description, 33, (height or 91)-39) end
     register(category,title,item,terms)
     return item
 end
 local function movementSlider(title, key, minimum, maximum)
-    local item = row("Movement",title,65,"card")
+    local item = row("Movement",title,62,"card")
     label(item,title,13,"text",size(1,-85,0,24),off(11,3))
     local value = label(item,"",11,"accent",off(70,24),size(1,-81,0,3),true)
     value.TextXAlignment = Enum.TextXAlignment.Right
@@ -936,31 +936,31 @@ F.detect()
 
 heading("Home", "Overview")
 local welcome = card("Home","Welcome, " .. player.Name,
-    "Compare loaded trees, view live player information, and make Evian Hub your own.",96)
+    "Compare loaded trees, view live player information, and make Evian Hub your own.",86)
 welcome.Name = "Welcome"
 local quick = row("Home","Quick access",39)
 button(quick,"Wood & Trees",size(.54,-4,1,0),nil,function() F.navigate("Wood & Trees") end,"selected")
 button(quick,"Settings",size(.46,-4,1,0),size(.54,4,0,0),function() F.navigate("Customisation") end)
-UI.overview = textBlock(card("Home","Feature overview",nil,95),"",35,46)
+UI.overview = textBlock(card("Home","Feature overview",nil,84),"",33,43)
 
 heading("Movement","Movement")
-UI.motionReadout = textBlock(card("Movement","Current movement",nil,91,"walk speed jump health"),
-    "Waiting for character…",35,43)
-local flightRow = row("Movement","Flight",44)
+UI.motionReadout = textBlock(card("Movement","Current movement",nil,85,"walk speed jump health"),
+    "Waiting for character…",33,44)
+local flightRow = row("Movement","Flight",42)
 UI.flyButton = button(flightRow,"Flight: OFF",size(1,0,1,0),nil,function() F.toggleFly() end,"selected")
 register("Movement","Flight",flightRow,"fly movement")
 movementSlider("Walk speed", "walk", 16, 100)
 movementSlider("Fly speed", "flySpeed", 10, 150)
 movementSlider("Jump height", "jump", 7.2, 60)
 heading("Player","Player")
-UI.playerReadout = textBlock(card("Player","Character status",nil,105,"health position coordinates"),
-    "Waiting for character…",35,56)
+UI.playerReadout = textBlock(card("Player","Character status",nil,97,"health position coordinates"),
+    "Waiting for character…",33,56)
 for _, name in ipairs({"Building","Automation","Visuals"}) do
     heading(name,name)
-    card(name,"No features configured","Features for this category will appear when they are specified.",89)
+    card(name,"No features configured","Features for this category will appear when they are specified.",82)
 end
 heading("Utilities","Utilities")
-local errorRow = row("Utilities","Latest error",44)
+local errorRow = row("Utilities","Latest error",42)
 button(errorRow,"Show latest error",size(1,0,1,0),nil,function()
     if not S.lastError then F.notify("No error has been recorded."); return end
     S.lastMessage = nil
@@ -979,12 +979,12 @@ button(treeCard,"›",off(38,35),size(1,-50,0,56),function() F.changeTree(1) end
 UI.scan = button(treeCard,"Scan loaded trees",size(1,-24,0,35),off(12,99),function() F.scan() end,"selected")
 UI.treeResult = label(treeCard,"Results only include trees loaded on this device.",11,"muted",size(1,-24,0,32),off(12,134))
 UI.treeResult.TextWrapped = true
-local bringRow = row("Wood & Trees","Bring largest tree",44)
+local bringRow = row("Wood & Trees","Bring largest tree",42)
 button(bringRow,"Bring largest tree",size(1,0,1,0),nil,function() F.startTree(true) end,"selected")
 register("Wood & Trees","Bring largest tree",bringRow,"chop cut bring tree axe")
-UI.logReadout = textBlock(card("Wood & Trees","Recent owned log",nil,91,"recent log location coordinates"),
-    "Waiting for a nearby owned log to appear…",35,43)
-local recentRow = row("Wood & Trees","Bring recent log",44)
+UI.logReadout = textBlock(card("Wood & Trees","Recent owned log",nil,84,"recent log location coordinates"),
+    "Waiting for a nearby owned log to appear…",33,43)
+local recentRow = row("Wood & Trees","Bring recent log",42)
 button(recentRow,"Bring recent log",size(1,0,1,0),nil,function() F.startTree(false) end)
 register("Wood & Trees","Bring recent log",recentRow,"bring tree recent log ownership")
 function F.changeTree(delta)
@@ -1613,7 +1613,7 @@ local function option(title,key,values,after)
     register(settings,title,item)
 end
 local function slider(title,key,lo,hi,asPercent)
-    local item = row(settings,title,64,"card")
+    local item = row(settings,title,62,"card")
     label(item,title,13,"text",size(1,-90,0,24),off(11,3))
     local value = label(item,"",11,"accent",off(73,24),size(1,-84,0,3),true)
     value.TextXAlignment = Enum.TextXAlignment.Right
@@ -1676,7 +1676,7 @@ option("Window theme","theme",{"Graphite","Midnight"},F.retheme)
 option("Accent colour","accent",{"Azure","Ice Blue","Periwinkle"},F.retheme)
 switch("Use animations","animations")
 switch("Compact spacing","compact",function()
-    for _, node in pairs(pages) do node.flow.Padding = UDim.new(0,cfg.compact and 5 or 8) end
+    for _, node in pairs(pages) do node.flow.Padding = UDim.new(0,cfg.compact and 4 or 6) end
 end)
 heading(settings,"Window and access")
 slider("Menu width","width",440,1080)
@@ -1698,7 +1698,7 @@ function F.storageLabel()
     UI.persistence.Text = S.storage and (S.saved and "Saved on this device." or "Local storage detected. Changes are saved automatically.")
         or "Session only • local settings storage unavailable."
 end
-local reset = row(settings,"Reset to defaults",44)
+local reset = row(settings,"Reset to defaults",42)
 button(reset,"Reset to defaults",size(1,0,1,0),nil,function()
     cfg = valid({})
     S.mobileExpanded = false
@@ -1773,7 +1773,7 @@ end)
 progress.Text = "Applying preferences…"
 fill.Size = size(.7,0,1,0)
 F.storageLabel()
-for _, node in pairs(pages) do node.flow.Padding = UDim.new(0,cfg.compact and 5 or 8) end
+for _, node in pairs(pages) do node.flow.Padding = UDim.new(0,cfg.compact and 4 or 6) end
 F.layout()
 showPage(cfg.category)
 F.paintNav(false)
