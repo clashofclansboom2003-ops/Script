@@ -1452,46 +1452,103 @@ do
             if not model.Parent or not inlet.Parent or not log.Parent then return nil,"The sawmill or a log disappeared." end
             local section = log:FindFirstChild("WoodSection")
             if not section or not section:IsA("BasePart") then return nil,"A log no longer has a wood section." end
-            local candidates = {}
-            op.outputConnection = models.ChildAdded:Connect(function(candidate) candidates[#candidates+1] = candidate end)
+            local candidates, started = {}, false
+            op.outputConnection = models.ChildAdded:Connect(function(candidate)
+                if started then candidates[#candidates+1] = candidate end
+            end)
+            local function outputSeen()
+                for _, output in ipairs(candidates) do
+                    local owner, wood = output:FindFirstChild("Owner"), output:FindFirstChild("WoodSection")
+                    if output.Parent == models and output:FindFirstChild("RecentlyCut") and owner
+                        and owner:IsA("ObjectValue") and owner.Value == player and wood and wood:IsA("BasePart")
+                        and (wood.Position-inlet.Position).Magnitude <= 30 then return true end
+                end
+                return false
+            end
             op.step = "Feeding log " .. i .. "/" .. #logs
             prompt.Text = op.step .. "…"
             op.moved = true
             op.root.CFrame = section.CFrame + Vector3.new(4,2,2)
             if ownership then ownership:FireServer(log); ownership:FireServer(section) end
             task.wait(.5)
-            for _ = 1,8 do
-                if not active(op) or not log.Parent or not model.Parent or not inlet.Parent then break end
-                drag:FireServer(log)
-                -- LT2 wood sections run along their local Y axis. Match the
-                -- Particles frame, or the long axis of the fallback conveyor.
-                local target = inlet.Name == "Particles" and inlet.Position or inlet.Position + Vector3.new(0,1,0)
-                local targetFrame = inlet.CFrame
-                if inlet.Name ~= "Particles" then
-                    targetFrame = targetFrame * (inlet.Size.X >= inlet.Size.Z
-                        and CFrame.Angles(0,0,-math.pi/2) or CFrame.Angles(math.pi/2,0,0))
-                end
-                targetFrame = targetFrame + (target-inlet.Position)
-                op.input = inlet.Name .. " • " .. coordinates(target)
-                log:PivotTo(targetFrame * section.CFrame:Inverse() * log:GetPivot())
-                op.root.CFrame = inlet.CFrame + Vector3.new(4,2,2)
-                task.wait(.25)
+            local observed = false
+            local originalLength = section.Size.Y
+            local waitSeconds = math.clamp(15 + originalLength * .5,20,45)
+            local function changedLog()
+                return section.Parent ~= log or section.Size.Y < originalLength-.05
             end
-            local deadline, observed = os.clock()+8, false
-            while active(op) and os.clock() < deadline do
-                for _, output in ipairs(candidates) do
-                    local owner, wood = output:FindFirstChild("Owner"), output:FindFirstChild("WoodSection")
-                    if output.Parent == models and output:FindFirstChild("RecentlyCut") and owner
-                        and owner:IsA("ObjectValue") and owner.Value == player and wood and wood:IsA("BasePart")
-                        and (wood.Position-inlet.Position).Magnitude <= 30 then observed = true; break end
+            local function turnedFrame(target, primary)
+                local holder = model:FindFirstChild("Conveyor")
+                local belt = holder and holder:FindFirstChild("Conveyor")
+                local direction = inlet.CFrame.LookVector
+                if belt and belt:IsA("BasePart") then
+                    direction = belt.Size.X >= belt.Size.Z and belt.CFrame.RightVector or belt.CFrame.LookVector
                 end
+                local flat = Vector3.new(direction.X,0,direction.Z)
+                if flat.Magnitude < .001 then
+                    local right = inlet.CFrame.RightVector
+                    flat = Vector3.new(right.X,0,right.Z)
+                end
+                if flat.Magnitude < .001 then flat = Vector3.new(0,0,-1) end
+                flat = flat.Unit
+                -- If the original orientation already uses that direction,
+                -- try the other horizontal direction on the retry.
+                if math.abs(primary.UpVector:Dot(flat)) > .98 then
+                    flat = Vector3.new(-flat.Z,0,flat.X)
+                end
+                local vertical = Vector3.new(0,1,0)
+                return CFrame.fromMatrix(target,vertical,flat,vertical:Cross(flat))
+            end
+            for attempt = 1,2 do
+                if attempt == 2 then prompt.Text = "Turning log " .. i .. "/" .. #logs .. "…" end
+                for _ = 1,attempt == 1 and 8 or 4 do
+                    if not active(op) or not model.Parent or not inlet.Parent then break end
+                    if outputSeen() then observed = true; break end
+                    if not log.Parent or changedLog() then break end
+                    started = true
+                    drag:FireServer(log)
+                    local target = inlet.Name == "Particles" and inlet.Position or inlet.Position + Vector3.new(0,1,0)
+                    local targetFrame = inlet.CFrame
+                    if inlet.Name ~= "Particles" then
+                        targetFrame = targetFrame * (inlet.Size.X >= inlet.Size.Z
+                            and CFrame.Angles(0,0,-math.pi/2) or CFrame.Angles(math.pi/2,0,0))
+                    end
+                    targetFrame = targetFrame + (target-inlet.Position)
+                    local upright = math.abs(targetFrame.UpVector.Y) > .7
+                    if upright then targetFrame = turnedFrame(target,targetFrame) end
+                    if attempt == 2 then targetFrame = turnedFrame(target,targetFrame) end
+                    op.input = inlet.Name .. " • " .. coordinates(target)
+                        .. (attempt == 2 and " • turned" or (upright and " • horizontal" or ""))
+                    log:PivotTo(targetFrame * section.CFrame:Inverse() * log:GetPivot())
+                    op.root.CFrame = inlet.CFrame + Vector3.new(4,2,2)
+                    task.wait(.25)
+                end
+                if observed or not active(op) or not model.Parent or not inlet.Parent
+                    or not log.Parent or changedLog() or attempt == 2 then break end
+                -- Give the mill time to start before trying a different angle.
+                local retryAt = os.clock()+5
+                while active(op) and model.Parent and inlet.Parent and log.Parent and not changedLog()
+                    and os.clock() < retryAt do
+                    if outputSeen() then observed = true; break end
+                    task.wait(.1)
+                end
+                if observed or not active(op) or not model.Parent or not inlet.Parent
+                    or not log.Parent or changedLog() then break end
+            end
+            local deadline = os.clock()+waitSeconds
+            while active(op) and os.clock() < deadline do
+                if not observed and outputSeen() then observed = true end
                 if observed and not log.Parent then break end
+                if not model.Parent or not inlet.Parent then break end
                 task.wait(.1)
             end
             op.outputConnection:Disconnect(); op.outputConnection = nil
             if not active(op) then return nil,"cancelled" end
+            if not model.Parent or not inlet.Parent then return nil,"The selected sawmill disappeared." end
             if not observed or log.Parent then
-                return nil,"Could not confirm milling for log " .. i .. "/" .. #logs .. "."
+                local status = observed and "output seen but log still present"
+                    or (log.Parent and "no output seen and log still present" or "log disappeared and no output seen")
+                return nil,"Log " .. i .. " of " .. #logs .. ": " .. status .. "."
             end
         end
         return true
