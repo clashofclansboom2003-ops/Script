@@ -27,6 +27,9 @@ local selectionMode = "structure"
 local selectionHighlight
 local viewportConnection
 local logConnection
+local hotbarTools, hotbarConnections = {}, {}
+local activeBtool
+local btoolsEnabled = false
 local gui
 local function connect(signal, callback)
     local connection = signal:Connect(callback)
@@ -56,6 +59,8 @@ local function cleanup()
     for _, connection in ipairs(connections) do connection:Disconnect() end
     if viewportConnection then viewportConnection:Disconnect(); viewportConnection = nil end
     if logConnection then logConnection:Disconnect(); logConnection = nil end
+    for _, connection in ipairs(hotbarConnections) do connection:Disconnect() end
+    for _, tool in ipairs(hotbarTools) do tool:Destroy() end
     for humanoid, values in pairs(savedHumanoids) do
         if humanoid.Parent then
             humanoid.WalkSpeed = values.walk
@@ -225,6 +230,7 @@ end)
 connect(player.CharacterAdded, function() stopFly(); flyButton.Text = "FLY: OFF" end)
 section("BUILDING")
 -- Touch-friendly building controls operate on models owned by the player.
+local moveSelected, deleteSelected, rotateSelected
 local function beginSelection(mode)
     selectedStructure = nil
     if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
@@ -237,12 +243,14 @@ button(bRow, "BTOOLS: SELECT OBJECT", nil, nil, function() beginSelection("objec
 local selectRow = row(36)
 button(selectRow, "SELECT PLACED STRUCTURE", nil, nil, function() beginSelection("structure") end)
 connect(UserInputService.InputBegan, function(input, processed)
-    if not selectingStructure or processed then return end
+    if (not selectingStructure and not activeBtool) or processed then return end
     if input.UserInputType ~= Enum.UserInputType.Touch and input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+    local toolAction = not selectingStructure and activeBtool or nil
+    local mode = toolAction == "rotate" and "structure" or (toolAction and "object" or selectionMode)
     local cameraNow = workspace.CurrentCamera
     local models = workspace:FindFirstChild("PlayerModels")
     local logs = workspace:FindFirstChild("LogModels")
-    if not cameraNow or (selectionMode == "structure" and not models) or (not models and not logs) then
+    if not cameraNow or (mode == "structure" and not models) or (not models and not logs) then
         tell("Placed objects are unavailable."); return
     end
     local ray = cameraNow:ScreenPointToRay(input.Position.X, input.Position.Y)
@@ -256,15 +264,19 @@ connect(UserInputService.InputBegan, function(input, processed)
     local kind = model and model:FindFirstChild("Type")
     local inOwnedFolder = model and (model.Parent == models or (logs and model.Parent == logs))
     local structure = model and model:IsA("Model") and model.Parent == models and kind and kind.Value == "Structure" and model.PrimaryPart
-    if not inOwnedFolder or not model:IsA("Model") or not owner or owner.Value ~= player or (selectionMode == "structure" and not structure) then
-        tell(selectionMode == "structure" and "Tap one of your own placed structures." or "Tap one of your own objects or logs.")
+    if not inOwnedFolder or not model:IsA("Model") or not owner or owner.Value ~= player or (mode == "structure" and not structure) then
+        tell(mode == "structure" and "Tap one of your own placed structures." or "Tap one of your own objects or logs.")
         return
     end
     selectingStructure = false
     selectedStructure = model
+    if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
     selectionHighlight = make("Highlight", {Adornee = model, FillTransparency = .7, OutlineColor = colors.accent, DepthMode = Enum.HighlightDepthMode.AlwaysOnTop}, model)
     local item = model:FindFirstChild("ItemName") or model:FindFirstChild("TreeClass")
     tell("Selected " .. (item and tostring(item.Value) or "object") .. ".")
+    if toolAction == "move" then moveSelected()
+    elseif toolAction == "delete" then deleteSelected()
+    elseif toolAction == "rotate" then rotateSelected() end
 end)
 local function selectedOwnedObject()
     local model = selectedStructure
@@ -272,8 +284,7 @@ local function selectedOwnedObject()
     if not model or not model.Parent or not owner or owner.Value ~= player then return nil end
     return model
 end
-local toolRow = row(36)
-button(toolRow, "MOVE TO ME", UDim2.new(0, 0, 0, 0), UDim2.new(.5, -4, 1, 0), function()
+moveSelected = function()
     local model = selectedOwnedObject()
     local _, _, root = characterParts()
     if not model or not root then tell("Select your object first."); return end
@@ -291,23 +302,31 @@ button(toolRow, "MOVE TO ME", UDim2.new(0, 0, 0, 0), UDim2.new(.5, -4, 1, 0), fu
     local interaction = ReplicatedStorage:FindFirstChild("Interaction")
     local ownership = interaction and interaction:FindFirstChild("ClientRequestOwnership")
     local drag = interaction and interaction:FindFirstChild("ClientIsDragging")
-    if not ownership or not drag then tell("Object move is unavailable."); return end
+    local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+    if not ownership or not ownership:IsA("RemoteEvent") or not drag or not drag:IsA("RemoteEvent") or not part then
+        tell("Object move is unavailable."); return
+    end
     local destination = (root.CFrame * CFrame.new(0, 3, -6)).Position
     tell("Moving selected object...")
     task.spawn(function()
+        local moved = false
         local ok, err = pcall(function()
             for _ = 1, 20 do
-                if not running or not model.Parent or not selectedOwnedObject() or selectedStructure ~= model then break end
+                if not running or not model.Parent or not part:IsDescendantOf(model) or not selectedOwnedObject() or selectedStructure ~= model then break end
                 ownership:FireServer(model)
+                ownership:FireServer(part)
                 drag:FireServer(model)
-                model:MoveTo(destination)
+                model:PivotTo(model:GetPivot() + (destination - part.Position))
+                moved = true
                 task.wait(.1)
             end
         end)
-        tell(ok and "Object move requested. Check whether the server accepted it." or ("Object move failed: " .. tostring(err)))
+        if not ok then tell("Object move failed: " .. tostring(err))
+        elseif moved then tell("Object move requested. Check whether the server accepted it.")
+        else tell("Object move cancelled.") end
     end)
-end)
-button(toolRow, "DELETE", UDim2.new(.5, 4, 0, 0), UDim2.new(.5, -4, 1, 0), function()
+end
+deleteSelected = function()
     local model = selectedOwnedObject()
     if not model then tell("Select your object first."); return end
     local interaction = ReplicatedStorage:FindFirstChild("Interaction")
@@ -325,9 +344,8 @@ button(toolRow, "DELETE", UDim2.new(.5, 4, 0, 0), UDim2.new(.5, -4, 1, 0), funct
     selectedStructure = nil
     if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
     tell("Delete requested. Check whether the server accepted it.")
-end)
-local rotateRow = row(36)
-button(rotateRow, "ROTATE SELECTED 90°", nil, nil, function()
+end
+rotateSelected = function()
     local model = selectedStructure
     local owner = model and model:FindFirstChild("Owner")
     local kind = model and model:FindFirstChild("Type")
@@ -343,6 +361,57 @@ button(rotateRow, "ROTATE SELECTED 90°", nil, nil, function()
     selectedStructure = nil
     if selectionHighlight then selectionHighlight:Destroy(); selectionHighlight = nil end
     tell("Rotation requested. Select the structure again to rotate it further.")
+end
+local toolRow = row(36)
+button(toolRow, "MOVE TO ME", UDim2.new(0, 0, 0, 0), UDim2.new(.5, -4, 1, 0), moveSelected)
+button(toolRow, "DELETE", UDim2.new(.5, 4, 0, 0), UDim2.new(.5, -4, 1, 0), deleteSelected)
+local rotateRow = row(36)
+button(rotateRow, "ROTATE SELECTED 90°", nil, nil, rotateSelected)
+local function createHotbarTools(backpack)
+    activeBtool = nil
+    for _, connection in ipairs(hotbarConnections) do connection:Disconnect() end
+    for _, tool in ipairs(hotbarTools) do tool:Destroy() end
+    hotbarConnections, hotbarTools = {}, {}
+    local definitions = {
+        {name = "LT2 Move", action = "move", tip = "Tap your object to move it to you"},
+        {name = "LT2 Delete", action = "delete", tip = "Tap your object to request deletion"},
+        {name = "LT2 Rotate", action = "rotate", tip = "Tap your structure to rotate it"},
+    }
+    for _, definition in ipairs(definitions) do
+        local tool = make("Tool", {Name = definition.name, ToolTip = definition.tip, RequiresHandle = false, CanBeDropped = false}, backpack)
+        table.insert(hotbarTools, tool)
+        table.insert(hotbarConnections, tool.Equipped:Connect(function()
+            activeBtool = definition.action
+            selectingStructure = false
+            tell(definition.tip .. ".")
+        end))
+        table.insert(hotbarConnections, tool.Unequipped:Connect(function()
+            if activeBtool == definition.action then activeBtool = nil end
+        end))
+    end
+end
+local function giveHotbarTools()
+    local backpack = player:FindFirstChildOfClass("Backpack")
+    if not backpack then tell("Wait for your backpack to load."); return end
+    if btoolsEnabled and #hotbarTools == 3 then
+        local allPresent = true
+        for _, tool in ipairs(hotbarTools) do
+            if tool.Parent ~= backpack and tool.Parent ~= player.Character then allPresent = false; break end
+        end
+        if allPresent then tell("BTOOLS are already in your hotbar or backpack."); return end
+    end
+    createHotbarTools(backpack)
+    btoolsEnabled = true
+    tell("BTOOLS added. Equip one, then tap your object.")
+end
+local hotbarRow = row(36)
+button(hotbarRow, "ADD BTOOLS TO HOTBAR", nil, nil, giveHotbarTools)
+connect(player.CharacterAdded, function(character)
+    if not btoolsEnabled then return end
+    task.spawn(function()
+        local backpack = player:WaitForChild("Backpack", 10)
+        if running and player.Character == character and backpack then createHotbarTools(backpack) end
+    end)
 end)
 section("BRING TREE")
 -- Only logs that appear after the tools start can be identified as recent.
