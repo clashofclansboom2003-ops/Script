@@ -795,6 +795,7 @@ local function updateMovement()
 end
 F.connect(player.CharacterAdded,function() F.stopFly(); features.movement.failed = false end)
 function F.cleanupFeatures()
+    if features.activity then features.activity.enabled, features.activity.records = false, {} end
     features.treeJob = (features.treeJob or 0)+1
     features.pendingCut = nil
     if features.restoreTree then
@@ -810,6 +811,91 @@ function F.cleanupFeatures()
         end
     end
 end
+-- Observation only: replicated positions and physics can be delayed or incomplete.
+features.activity = {enabled = false, records = {}, elapsed = 0}
+function F.toggleActivity()
+    local monitor = features.activity
+    monitor.enabled = not monitor.enabled
+    monitor.records, monitor.elapsed, monitor.lastNotice = {}, 0, nil
+    UI.activityButton.Text = "Movement monitor: " .. (monitor.enabled and "ON" or "OFF")
+    UI.activityReadout.Text = monitor.enabled and "Watching loaded players for unusual movement."
+        or "Monitor off. Alerts are observations, not proof."
+    F.notify(monitor.enabled and "Movement monitor on." or "Movement monitor off.")
+    F.telemetry()
+end
+function F.sampleActivity()
+    local monitor, now, present = features.activity, os.clock(), {}
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    local function alert(target, state, reason)
+        if state.lastAlert and now-state.lastAlert < 30 then return end
+        state.lastAlert = now
+        local name = tostring(target.Name):sub(1,24)
+        UI.activityReadout.Text = name .. ": " .. reason .. ". This is not proof of cheating."
+        if not monitor.lastNotice or now-monitor.lastNotice >= 5 then
+            monitor.lastNotice = now
+            F.notify("Unusual movement: " .. name .. ". See Player for details.")
+        end
+    end
+    for _, target in ipairs(Players:GetPlayers()) do
+        if target ~= player then
+            present[target] = true
+            local character = target.Character
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            local root = character and character:FindFirstChild("HumanoidRootPart")
+            local stateOK, currentState = pcall(function() return humanoid and humanoid:GetState() end)
+            local excludedState = stateOK and (currentState == Enum.HumanoidStateType.Climbing
+                or currentState == Enum.HumanoidStateType.Swimming or currentState == Enum.HumanoidStateType.Seated)
+            if not humanoid or humanoid.Health <= 0 or humanoid.Sit or excludedState or not root
+                or not root:IsA("BasePart") or root.Anchored then
+                monitor.records[target] = nil
+            else
+                local position, velocity = root.Position, root.AssemblyLinearVelocity
+                local state = monitor.records[target]
+                if not state or state.character ~= character or state.root ~= root then
+                    state = {character=character,root=root,position=position,at=now,stable=0,speed=0,hover=0}
+                    monitor.records[target] = state
+                else
+                    local delta, seconds = position-state.position, now-state.at
+                    state.position, state.at = position, now
+                    if seconds < .25 or seconds > 1.5 then
+                        state.stable, state.speed, state.hover, state.lastJump = 0,0,0,nil
+                    else
+                        local horizontal = math.sqrt(delta.X*delta.X+delta.Z*delta.Z)
+                        local reportedSpeed = math.sqrt(velocity.X*velocity.X+velocity.Z*velocity.Z)
+                        if horizontal/seconds > 70 and reportedSpeed > 55 then state.speed = state.speed+1
+                        else state.speed = 0 end
+                        if state.speed >= 4 then alert(target,state,"sustained fast movement") end
+                        if delta.Magnitude >= 120 then
+                            if state.stable >= 2 and state.lastJump and now-state.lastJump <= 12 then
+                                alert(target,state,"repeated large position jumps")
+                            end
+                            state.lastJump, state.stable, state.hover = now,0,0
+                        else
+                            state.stable = state.stable+1
+                            if math.abs(delta.Y) < 1.5 and math.abs(velocity.Y) < 3 then
+                                local exclude = {character}
+                                if player.Character then exclude[#exclude+1] = player.Character end
+                                rayParams.FilterDescendantsInstances = exclude
+                                local ground = workspace:Raycast(position,Vector3.new(0,-100,0),rayParams)
+                                local surface = ground and ground.Instance
+                                local stableGround = surface and (surface:IsA("Terrain")
+                                    or (surface:IsA("BasePart") and surface.Anchored))
+                                if stableGround and ground.Material ~= Enum.Material.Water and ground.Position
+                                    and position.Y-ground.Position.Y > 18 then
+                                    state.hover = state.hover+seconds
+                                else state.hover = 0 end
+                                if state.hover >= 8 then alert(target,state,"prolonged hovering") end
+                            else state.hover = 0 end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    for target in pairs(monitor.records) do if not present[target] then monitor.records[target] = nil end end
+end
+
 local function findTree(treeClass)
     local best, bestWood, bestVolume
     for _, region in ipairs(workspace:GetChildren()) do
@@ -955,6 +1041,11 @@ movementSlider("Jump height", "jump", 7.2, 60)
 heading("Player","Player")
 UI.playerReadout = textBlock(card("Player","Character status",nil,97,"health position coordinates"),
     "Waiting for character…",33,56)
+local activityCard = card("Player","Suspicious movement",nil,132,"cheater hacker exploit speed teleport flight monitor")
+textBlock(activityCard,"Watches loaded players. Unusual movement is not proof of cheating.",33,46)
+UI.activityButton = button(activityCard,"Movement monitor: OFF",size(1,-24,0,35),off(12,87),function() F.toggleActivity() end,"selected")
+UI.activityReadout = textBlock(card("Player","Latest activity",nil,91,"suspicious activity alerts"),
+    "Monitor off. Alerts are observations, not proof.",33,50)
 for _, name in ipairs({"Building","Automation","Visuals"}) do
     heading(name,name)
     card(name,"No features configured","Features for this category will appear when they are specified.",82)
@@ -1792,6 +1883,7 @@ function F.telemetry()
     end
     local activeFeatures = {}
     if features.movement.flying then activeFeatures[#activeFeatures+1] = "Flight" end
+    if features.activity.enabled then activeFeatures[#activeFeatures+1] = "Movement monitor" end
     if features.treeBusy then activeFeatures[#activeFeatures+1] = "Tree request" end
     local summary = #activeFeatures > 0 and table.concat(activeFeatures, ", ") or "No automation running"
     UI.overview.Text = (features.trees and "Tree comparison available • " or "Tree comparison awaiting LT2 regions • ") .. summary
@@ -1816,6 +1908,21 @@ F.connect(RunService.Heartbeat,function(dt)
             F.stopFly()
             warn("[Evian Hub] Movement:",err)
             F.notify("Movement controls are unavailable.",true,{code = "M03", details = "Step: update movement\nCause: " .. F.errorText(err)})
+        end
+    end
+    local activity = features.activity
+    if activity.enabled then
+        activity.elapsed = activity.elapsed + dt
+        if activity.elapsed >= .5 then
+            activity.elapsed = 0
+            local ok, err = pcall(F.sampleActivity)
+            if not ok then
+                activity.enabled, activity.records = false, {}
+                UI.activityButton.Text = "Movement monitor: OFF"
+                UI.activityReadout.Text = "Monitor stopped. Check the latest error."
+                warn("[Evian Hub] Movement monitor:",err)
+                F.notify("Movement monitor stopped.",true,{code="P01",details="Step: check players\nCause: " .. F.errorText(err)})
+            end
         end
     end
     if not S.open and #features.pendingLogs == 0 then return end
