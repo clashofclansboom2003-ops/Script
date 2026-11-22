@@ -18,6 +18,12 @@ for _, key in ipairs({"EvianHubCleanup", "LT2MobileCleanup"}) do
 end
 
 local F, S, UI = {}, {alive = true, gameStatus = "Checking game…"}, {}
+function F.errorText(err)
+    local line = tostring(err):match("^[^\r\n]*") or "Unknown error"
+    line = line:gsub("^.-:%d+:%s*", ""):gsub("https?://%S+", "[url]")
+    line = line:gsub("[/\\][^%s:]+", "[path]"):gsub("[^%w%s%._:%-%[%]]", "?")
+    return line:sub(1,72)
+end
 local connections, tweens = {}, setmetatable({}, {__mode = "k"})
 local styles = setmetatable({}, {__mode = "k"})
 local file = "EvianHub-v1-settings.json"
@@ -78,7 +84,8 @@ function F.flush()
         S.storage = false
         warn("[Evian Hub] Settings storage:", err)
         if F.storageLabel then F.storageLabel() end
-        if S.alive and F.notify then F.notify("Settings are available for this session only.", true) end
+        if S.alive and F.notify then F.notify("Settings are available for this session only.", true,
+            {code = "S01", details = "Step: save settings\nCause: " .. F.errorText(err)}) end
     else
         S.saved = true
         if F.storageLabel then F.storageLabel() end
@@ -206,7 +213,12 @@ local function button(parent, text, bounds, position, action, key)
         b.Activated:Connect(function()
             F.motion(press, "press", {Scale = 1}, .1)
             local ok, err = xpcall(action, debug.traceback)
-            if not ok then warn("[Evian Hub]", err); F.notify("This control couldn't complete. Try again.", true) end
+            if not ok then
+                warn("[Evian Hub]", err)
+                local control = b.Name ~= "TextButton" and b.Name or (b.Text ~= "" and b.Text or "button")
+                F.notify("This control couldn't complete. Try again.", true,
+                    {code = "U01", details = "Control: " .. F.errorText(control) .. "\nCause: " .. F.errorText(err)})
+            end
         end)
     end
     return b
@@ -274,33 +286,71 @@ UI.root = frame(UI.gui, "Safe Area")
 UI.notifications = frame(UI.root, "Notifications", nil, size(.9,0,0,0), size(1,-12,0,10))
 UI.notifications.AnchorPoint = Vector2.new(1,0)
 UI.notifications.ZIndex = 20
-UI.notifications.Interactable = false
-make("UISizeConstraint", {MaxSize = Vector2.new(292, 180)}, UI.notifications)
+UI.notifications.Active = false
+make("UISizeConstraint", {MaxSize = Vector2.new(292, 260)}, UI.notifications)
 make("UIListLayout", {Padding = UDim.new(0,7), SortOrder = Enum.SortOrder.LayoutOrder}, UI.notifications)
-local toasts, toastSerial = {}, 0
-function F.notify(message, isError)
+local toasts, toastErrors, toastSerial = {}, {}, 0
+local loading
+local function resizeNotifications()
+    local height, count = 0, 0
+    if loading and loading.Parent then height, count = 65, 1 end
+    for _, card in ipairs(toasts) do
+        if card.Parent then height, count = height + card.Size.Y.Offset, count + 1 end
+    end
+    UI.notifications.Size = size(.9,0,0,height + math.max(0,count-1)*7)
+end
+local function removeToast(card)
+    for i, item in ipairs(toasts) do
+        if item == card then table.remove(toasts, i); break end
+    end
+    toastErrors[card] = nil
+    card:Destroy()
+    resizeNotifications()
+end
+function F.notify(message, isError, diagnostic)
     if not S.alive then return end
-    if S.lastMessage == message and os.clock() - (S.lastNotice or 0) < 2 then return end
-    S.lastMessage, S.lastNotice = message, os.clock()
-    if #toasts >= 3 then table.remove(toasts, 1):Destroy() end
+    local signature = message .. (diagnostic and (diagnostic.code or "") or "")
+    if S.lastMessage == signature and os.clock() - (S.lastNotice or 0) < 2 then return end
+    S.lastMessage, S.lastNotice = signature, os.clock()
+    if isError then
+        S.lastError = {message = message, diagnostic = diagnostic}
+        for i = #toasts, 1, -1 do if toastErrors[toasts[i]] then removeToast(toasts[i]) end end
+    end
+    if #toasts >= 2 then
+        for _, item in ipairs(toasts) do if not toastErrors[item] then removeToast(item); break end end
+    end
     toastSerial = toastSerial + 1
-    local card = frame(UI.notifications, "Notification", "card", size(1,0,0,60))
+    local card = frame(UI.notifications, "Notification", "card", size(1,0,0,isError and 177 or 60))
     card.LayoutOrder = toastSerial
     corner(card, 9); border(card)
     local accent = isError and "error" or "accent"
-    corner(frame(card, "Indicator", accent, off(3,38), off(8,11)), 2)
-    label(card, isError and "ACTION UNAVAILABLE" or "EVIAN HUB", 10, accent, size(1,-28,0,16), off(18,6), true)
-    local msg = label(card, message, 12, "text", size(1,-28,0,33), off(18,22))
+    corner(frame(card, "Indicator", accent, off(3,isError and 155 or 38), off(8,11)), 2)
+    local title = isError and ("ERROR " .. (diagnostic and diagnostic.code or "GENERAL")) or "EVIAN HUB"
+    label(card, title, 10, accent, size(1,-56,0,16), off(18,6), true)
+    local msg = label(card, message, 12, "text", size(1,-28,0,isError and 34 or 33), off(18,isError and 36 or 22))
     msg.TextWrapped = true
+    msg.TextYAlignment = Enum.TextYAlignment.Top
+    if isError then
+        msg.TextTruncate = Enum.TextTruncate.None
+        local detail = label(card, diagnostic and diagnostic.details or "See the game console for technical details.", 11, "muted", size(1,-28,0,93), off(18,75))
+        detail.TextWrapped = true
+        detail.TextYAlignment = Enum.TextYAlignment.Top
+        detail.TextTruncate = Enum.TextTruncate.None
+        local dismiss = button(card, "×", off(30,30), size(1,-35,0,4), function()
+            removeToast(card)
+            S.lastMessage = nil
+        end)
+        dismiss.Name = "Dismiss error"
+        toastErrors[card] = true
+    end
     toasts[#toasts+1] = card
-    task.delay(5.5, function()
-        if not S.alive then return end
-        for i, item in ipairs(toasts) do
-            if item == card then table.remove(toasts, i); card:Destroy(); break end
-        end
-    end)
+    resizeNotifications()
+    if not isError then
+        task.delay(5.5, function() if S.alive and card.Parent then removeToast(card) end end)
+    end
 end
-local loading = frame(UI.notifications, "Loading", "card", size(1,0,0,65))
+loading = frame(UI.notifications, "Loading", "card", size(1,0,0,65))
+resizeNotifications()
 corner(loading, 9); border(loading); logo(loading, off(12,13))
 label(loading, "Evian Hub", 14, "text", size(1,-70,0,20), off(58,9), true)
 local progress = label(loading, "Preparing interface…", 11, "muted", size(1,-70,0,17), off(58,29))
@@ -700,13 +750,18 @@ function F.toggleFly()
     local movement = features.movement
     if movement.flying then F.stopFly(); F.notify("Flight off."); return end
     local humanoid, root = characterParts()
-    if not humanoid or not root then F.notify("Wait for your character to load.",true); return end
+    if not humanoid or not root then
+        F.notify("Wait for your character to load.",true,{code = "M01", details = "Step: start flight\nHumanoid: " .. (humanoid and "ready" or "missing") .. " • Root: " .. (root and "ready" or "missing")})
+        return
+    end
     local ok, err = pcall(function()
         movement.velocity = make("BodyVelocity", {Name = "LT2FlyVelocity", MaxForce = Vector3.new(1e6,1e6,1e6), Velocity = Vector3.zero, P = 12500}, root)
         movement.gyro = make("BodyGyro", {Name = "LT2FlyGyro", MaxTorque = Vector3.new(0,1e6,0), P = 10000, CFrame = root.CFrame}, root)
     end)
     if not ok then
-        F.stopFly(); warn("[Evian Hub] Flight:", err); F.notify("Flight could not start.",true); return
+        F.stopFly(); warn("[Evian Hub] Flight:", err)
+        F.notify("Flight could not start.",true,{code = "M02", details = "Step: create flight controls\nCause: " .. F.errorText(err)})
+        return
     end
     movement.flying = true
     UI.flyButton.Text = "Flight: ON"
@@ -789,6 +844,26 @@ local function remote(interaction, name)
     local object = interaction and interaction:FindFirstChild(name)
     return object and object:IsA("RemoteEvent") and object or nil
 end
+function F.treeDiagnostic(code, step, cause)
+    local interaction = ReplicatedStorage:FindFirstChild("Interaction")
+    local character = player.Character
+    local tool = character and character:FindFirstChildOfClass("Tool")
+    local toolName = tool and tool:FindFirstChild("ToolName")
+    local name = toolName and toolName:IsA("StringValue") and toolName.Value or (tool and tool.Name or "none")
+    name = tostring(name):gsub("[^%w_%- ]", "?"):sub(1,24)
+    local classes = ReplicatedStorage:FindFirstChild("AxeClasses")
+    local axeClass = toolName and toolName:IsA("StringValue") and classes and classes:FindFirstChild("AxeClass_" .. toolName.Value)
+    local function kind(object) return object and object.ClassName or "missing" end
+    local tree = features.activeTree or treeTypes[features.treeIndex]
+    local details = "Step: " .. step .. " • Tree: " .. tree[1]
+        .. "\nAxe: " .. name .. " • Axe data: " .. kind(axeClass)
+        .. "\nLogs: " .. kind(workspace:FindFirstChild("LogModels")) .. " • Interaction: " .. kind(interaction)
+        .. "\nDrag: " .. kind(interaction and interaction:FindFirstChild("ClientIsDragging"))
+        .. " • Cut: " .. kind(interaction and interaction:FindFirstChild("RemoteProxy"))
+        .. " • Own: " .. kind(interaction and interaction:FindFirstChild("ClientRequestOwnership"))
+    if cause then details = details .. "\nCause: " .. F.errorText(cause) end
+    return {code = code, details = details}
+end
 function F.detect()
     if game.PlaceId == 13822889 then S.gameStatus = "Lumber Tycoon 2"
     else S.gameStatus = "Outside LT2" end
@@ -800,8 +875,8 @@ function F.detect()
     end
     features.trees = available
     local interaction = ReplicatedStorage:FindFirstChild("Interaction")
-    features.treeTransfer = game.PlaceId == 13822889 and remote(interaction,"ClientRequestOwnership") ~= nil
-        and remote(interaction,"ClientIsDragging") ~= nil and features.logFolder ~= nil
+    features.treeTransfer = game.PlaceId == 13822889 and remote(interaction,"ClientIsDragging") ~= nil
+        and features.logFolder ~= nil
     features.treeCutting = features.treeTransfer and remote(interaction,"RemoteProxy") ~= nil
         and ReplicatedStorage:FindFirstChild("AxeClasses") ~= nil
     if UI.treeAvailability then
@@ -882,10 +957,18 @@ movementSlider("Jump height", "jump", 7.2, 60)
 heading("Player","Player")
 UI.playerReadout = textBlock(card("Player","Character status",nil,105,"health position coordinates"),
     "Waiting for character…",35,56)
-for _, name in ipairs({"Building","Automation","Visuals","Utilities"}) do
+for _, name in ipairs({"Building","Automation","Visuals"}) do
     heading(name,name)
     card(name,"No features configured","Features for this category will appear when they are specified.",89)
 end
+heading("Utilities","Utilities")
+local errorRow = row("Utilities","Latest error",44)
+button(errorRow,"Show latest error",size(1,0,1,0),nil,function()
+    if not S.lastError then F.notify("No error has been recorded."); return end
+    S.lastMessage = nil
+    F.notify(S.lastError.message,true,S.lastError.diagnostic)
+end)
+register("Utilities","Latest error",errorRow,"diagnostics screenshot error")
 
 heading("Wood & Trees","Wood & Trees")
 local treeCard = card("Wood & Trees","Largest loaded tree",nil,174,"scan size species wood volume")
@@ -916,7 +999,9 @@ end
 function F.scan()
     if os.clock()-(features.lastScan or -1) < .35 then return end
     features.lastScan = os.clock()
-    if not features.trees then F.notify("No LT2 tree regions are loaded on this device.",true); return end
+    if not features.trees then
+        F.notify("No LT2 tree regions are loaded on this device.",true,F.treeDiagnostic("T20","Scanning")); return
+    end
     local selected = treeTypes[features.treeIndex]
     local model, wood, volume = findTree(selected[2])
     features.selected = model and {model = model, name = selected[1]} or nil
@@ -925,7 +1010,7 @@ function F.scan()
         F.notify("Largest loaded " .. selected[1] .. " located.")
     else
         UI.treeResult.Text = "No eligible " .. selected[1] .. " trees loaded."
-        F.notify(UI.treeResult.Text, true)
+        F.notify(UI.treeResult.Text, true,F.treeDiagnostic("T21","Scanning"))
     end
     F.telemetry()
 end
@@ -934,33 +1019,45 @@ local function axeStats(axe, species)
     local name = axe and axe:FindFirstChild("ToolName")
     local classes = ReplicatedStorage:FindFirstChild("AxeClasses")
     local module = name and name:IsA("StringValue") and classes and classes:FindFirstChild("AxeClass_" .. name.Value)
-    if not module or not module:IsA("ModuleScript") then return nil end
+    if not name or not name:IsA("StringValue") then return nil,nil,nil,"ToolName missing or invalid" end
+    if not classes then return nil,nil,nil,"AxeClasses missing" end
+    if not module or not module:IsA("ModuleScript") then return nil,nil,nil,"Axe module missing or invalid" end
     local ok, stats = pcall(function()
         local definition = require(module)
         return definition.new()
     end)
-    if not ok or type(stats) ~= "table" then return nil end
+    if not ok then return nil,nil,nil,"Axe module error: " .. F.errorText(stats) end
+    if type(stats) ~= "table" then return nil,nil,nil,"Axe module returned invalid settings" end
     local special = type(stats.SpecialTrees) == "table" and stats.SpecialTrees[species]
     local damage = type(special) == "table" and special.Damage or stats.Damage
     local cooldown = type(special) == "table" and special.SwingCooldown or stats.SwingCooldown
     if type(damage) ~= "number" or damage ~= damage or damage <= 0 or damage == math.huge
-        or type(cooldown) ~= "number" or cooldown ~= cooldown or cooldown <= 0 or cooldown == math.huge then return nil end
+        or type(cooldown) ~= "number" or cooldown ~= cooldown or cooldown <= 0 or cooldown == math.huge then
+        return nil,nil,nil,"Damage or swing cooldown invalid"
+    end
     return damage, cooldown, math.max(.12,cooldown)
 end
 function F.startTree(automatic)
-    if features.treeBusy then F.notify("A tree request is already running.",true); return end
-    if game.PlaceId ~= 13822889 then F.notify("Tree actions are available in Lumber Tycoon 2.",true); return end
+    local function report(code, message, step, cause)
+        F.notify(message,true,F.treeDiagnostic(code,step,cause))
+    end
+    if features.treeBusy then report("T01","A tree request is already running.","Checking"); return end
+    if game.PlaceId ~= 13822889 then report("T02","Tree actions are available in Lumber Tycoon 2.","Checking"); return end
     local character = player.Character
     local humanoid, root = characterParts()
-    if not character or not humanoid or not root then F.notify("Wait for your character to load.",true); return end
+    if not character or not humanoid or not root then report("T03","Wait for your character to load.","Character"); return end
     local interaction = ReplicatedStorage:FindFirstChild("Interaction")
     local ownership = remote(interaction,"ClientRequestOwnership")
     local drag = remote(interaction,"ClientIsDragging")
     local proxy = remote(interaction,"RemoteProxy")
-    if not features.logFolder or not drag or not ownership or (automatic and not proxy) then
-        F.notify("Tree actions are unavailable: LT2 interaction data is missing.",true); return
-    end
+    -- Refresh the log folder in case it replicated after the hub was opened.
+    if not features.logFolder then F.watchLogs() end
+    if not features.logFolder then report("T04","Tree action unavailable: LogModels is missing.","Checking"); return end
+    if not interaction then report("T05","Tree action unavailable: Interaction is missing.","Checking"); return end
+    if not drag then report("T06","Tree action unavailable: ClientIsDragging is missing or unsupported.","Checking"); return end
+    if automatic and not proxy then report("T07","Tree action unavailable: RemoteProxy is missing or unsupported.","Checking"); return end
     features.treeBusy = true
+    features.activeTree = treeTypes[features.treeIndex]
     features.treeJob = (features.treeJob or 0)+1
     local job = features.treeJob
     local original = root.CFrame
@@ -975,30 +1072,39 @@ function F.startTree(automatic)
         return S.alive and features.treeJob == job and character == player.Character and root.Parent and humanoid.Health > 0
     end
     task.spawn(function()
+        local step, failureCode, failureCause = "Checking", "T99", nil
+        local function failure(code, message, cause)
+            failureCode, failureCause = code, cause
+            return message
+        end
         local ok, message = xpcall(function()
             local log = features.recentLog
             if automatic then
-                local choice = treeTypes[features.treeIndex]
+                step = "Finding tree"
+                local choice = features.activeTree
                 local tree, wood = findTree(choice[2])
-                if not tree then return "No eligible " .. choice[1] .. " tree is loaded." end
+                if not tree then return failure("T08","No eligible " .. choice[1] .. " tree is loaded.") end
+                step = "Checking axe"
                 local axe = character:FindFirstChildOfClass("Tool")
-                if not axe then return "Equip an axe before bringing a tree." end
-                local damage, cooldown, interval = axeStats(axe,choice[2])
-                if not damage then return "The equipped axe's LT2 settings are unavailable." end
-                if not tree.Parent or not wood.Parent then return "The selected tree is no longer available." end
+                if not axe then return failure("T09","Equip an axe before bringing a tree.") end
+                local damage, cooldown, interval, reason = axeStats(axe,choice[2])
+                if not damage then return failure("T10","The equipped axe's LT2 settings are unavailable.",reason) end
+                if not tree.Parent or not wood.Parent then return failure("T11","The selected tree is no longer available.") end
                 F.stopFly()
                 local cut = {species = choice[2], position = wood.Position}
                 features.pendingCut = cut
+                step = "Going to tree"
                 root.CFrame = wood.CFrame + Vector3.new(4,2,2)
                 F.notify("Cutting the largest loaded " .. choice[1] .. ".")
                 task.wait(.3)
                 local deadline = os.clock()+20
                 local nextSwing = 0
+                step = "Cutting"
                 while active() and features.pendingCut == cut and not cut.log and os.clock() < deadline do
-                    if axe.Parent ~= character then return "The equipped axe became unavailable." end
+                    if axe.Parent ~= character then return failure("T12","The equipped axe became unavailable.") end
                     local owner = tree:FindFirstChild("Owner")
                     if owner and (not owner:IsA("ObjectValue") or (owner.Value and owner.Value ~= player)) then
-                        return "The selected tree is no longer available."
+                        return failure("T13","The selected tree is no longer available.","Tree ownership changed")
                     end
                     local event = tree.Parent and tree:FindFirstChild("CutEvent")
                     if event and os.clock() >= nextSwing then
@@ -1012,25 +1118,29 @@ function F.startTree(automatic)
                 log = cut.log
                 if features.pendingCut == cut then features.pendingCut = nil end
                 if not active() then return end
-                if not log then return "No matching log appeared; the cut may have been rejected." end
+                if not log then return failure("T14","No matching log appeared; the cut may have been rejected.","Timed out after 20 seconds") end
             end
+            step = "Checking log"
             if not log or log.model.Parent ~= features.logFolder or log.part.Parent ~= log.model
                 or log.owner.Parent ~= log.model or log.owner.Value ~= player then
-                return automatic and "The cut log is unavailable." or "Chop a nearby tree while the hub is open first."
+                return failure("T15",automatic and "The cut log is unavailable." or "Chop a nearby tree while the hub is open first.")
             end
             local function available()
                 return active() and log.model.Parent == features.logFolder and log.part.Parent == log.model
                     and log.owner.Parent == log.model and log.owner.Value == player
             end
             F.stopFly()
+            step = "Moving log"
             root.CFrame = log.part.CFrame + Vector3.new(4,2,2)
-            if not available() then return "The log became unavailable before moving." end
-            ownership:FireServer(log.model)
-            ownership:FireServer(log.part)
+            if not available() then return failure("T16","The log became unavailable before moving.") end
+            if ownership then
+                ownership:FireServer(log.model)
+                ownership:FireServer(log.part)
+            end
             task.wait(.5)
             local moved = false
             for _ = 1,8 do
-                if not available() then return "The log or character became unavailable during the move." end
+                if not available() then return failure("T17","The log or character became unavailable during the move.") end
                 drag:FireServer(log.model)
                 log.model:PivotTo(log.model:GetPivot() + (destination-log.part.Position))
                 moved = true
@@ -1043,9 +1153,17 @@ function F.startTree(automatic)
         local restored, restoreError = pcall(restorePosition)
         features.treeBusy = false
         if not S.alive then return end
-        if not restored then warn("[Evian Hub] Returning to start:",restoreError); F.notify("Could not return to the starting spot.",true)
-        elseif not ok then warn("[Evian Hub] Tree action:",message); F.notify("The tree request failed.",true)
-        elseif message then F.notify(message, not message:find("move requested",1,true)) end
+        if not restored then
+            warn("[Evian Hub] Returning to start:",restoreError)
+            report("T18","Could not return to the starting spot.","Returning",restoreError)
+        elseif not ok then
+            warn("[Evian Hub] Tree action:",message)
+            report("T99","The tree request failed.",step,message)
+        elseif message then
+            if message:find("move requested",1,true) then F.notify(message)
+            else report(failureCode,message,step,failureCause) end
+        end
+        features.activeTree = nil
     end)
 end
 for _, signal in ipairs({workspace.ChildAdded,workspace.ChildRemoved}) do
@@ -1269,7 +1387,7 @@ F.connect(RunService.Heartbeat,function(dt)
             features.movement.failed = true
             F.stopFly()
             warn("[Evian Hub] Movement:",err)
-            F.notify("Movement controls are unavailable.",true)
+            F.notify("Movement controls are unavailable.",true,{code = "M03", details = "Step: update movement\nCause: " .. F.errorText(err)})
         end
     end
     if not S.open and #features.pendingLogs == 0 then return end
@@ -1293,4 +1411,4 @@ F.telemetry()
 F.show(true)
 progress.Text = "Ready"
 fill.Size = size(1,0,1,0)
-task.delay(.55,function() if S.alive then loading:Destroy() end end)
+task.delay(.55,function() if S.alive then loading:Destroy(); resizeNotifications() end end)
