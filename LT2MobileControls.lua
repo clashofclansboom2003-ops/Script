@@ -1463,10 +1463,17 @@ do
             for _ = 1,8 do
                 if not active(op) or not log.Parent or not model.Parent or not inlet.Parent then break end
                 drag:FireServer(log)
-                -- Aim at Particles when present; retain the conveyor surface offset as a fallback.
+                -- LT2 wood sections run along their local Y axis. Match the
+                -- Particles frame, or the long axis of the fallback conveyor.
                 local target = inlet.Name == "Particles" and inlet.Position or inlet.Position + Vector3.new(0,1,0)
+                local targetFrame = inlet.CFrame
+                if inlet.Name ~= "Particles" then
+                    targetFrame = targetFrame * (inlet.Size.X >= inlet.Size.Z
+                        and CFrame.Angles(0,0,-math.pi/2) or CFrame.Angles(math.pi/2,0,0))
+                end
+                targetFrame = targetFrame + (target-inlet.Position)
                 op.input = inlet.Name .. " • " .. coordinates(target)
-                log:PivotTo(log:GetPivot() + (target-section.Position))
+                log:PivotTo(targetFrame * section.CFrame:Inverse() * log:GetPivot())
                 op.root.CFrame = inlet.CFrame + Vector3.new(4,2,2)
                 task.wait(.25)
             end
